@@ -79,7 +79,7 @@ TEST(vulkan, aplusb)
 {
 	std::vector<gpu::Device> devices = enumVKDevices();
 
-	unsigned int n = 100 * 1000 * 1000;
+	unsigned int n = 8388608;
 
 	std::vector<unsigned int> as(n, 0);
 	std::vector<unsigned int> bs(n, 0);

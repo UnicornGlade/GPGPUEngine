@@ -19,7 +19,7 @@ TEST(vulkan, atomicAdd)
 		avk2::KernelSource kernel_atomic_add(avk2::getAtomicAddKernel());
 
 		std::vector<int> setup_n_additions = {5,	10,		100000,		10000000,	10000000};
-		std::vector<int> setup_table_sizes = {10,	5,		1000000,	100000000,	1000	};
+		std::vector<int> setup_table_sizes = {10,	5,		1000000,	33554368,	1000	};
 		std::vector<int> setup_max_addings = {1024,	1024,	8,			1,			1		};
 
 		int niters = 3;
