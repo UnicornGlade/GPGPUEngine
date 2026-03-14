@@ -9,6 +9,7 @@ install_prefix=/usr/local
 
 sudo apt update
 sudo apt install -yq graphicsmagick-libmagick-dev-compat # we need Magick++.h so that CImg.h can load jpg files
+sudo apt install libwayland-dev
 
 googletest_version=1.10.0
 
