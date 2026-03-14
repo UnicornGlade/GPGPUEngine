@@ -3,8 +3,13 @@
 #include "generated_kernels/aplusb_comp.h"
 #include "generated_kernels/atomic_add_comp.h"
 #include "generated_kernels/batched_binary_search_comp.h"
+#include "generated_kernels/fill_buffer_with_zeros_comp.h"
 #include "generated_kernels/image_conversion_from_float_to_T_comp.h"
 #include "generated_kernels/image_interpolation_comp.h"
+#include "generated_kernels/radix_sort_01_local_counting_comp.h"
+#include "generated_kernels/radix_sort_02_global_prefixes_scan_sum_reduction_comp.h"
+#include "generated_kernels/radix_sort_03_global_prefixes_scan_accumulation_comp.h"
+#include "generated_kernels/radix_sort_04_scatter_comp.h"
 #include "generated_kernels/rasterize_frag.h"
 #include "generated_kernels/rasterize_vert.h"
 #include "generated_kernels/rasterize_blending_frag.h"
@@ -22,6 +27,9 @@ namespace avk2 {
 	const ProgramBinaries& getBatchedBinarySearch() {
 		return vulkan_binaries_batched_binary_search_comp;
 	}
+	const ProgramBinaries& getFillBufferWithZerosKernel() {
+		return vulkan_binaries_fill_buffer_with_zeros_comp;
+	}
 	const ProgramBinaries& getImageConversionFromFloatToT(DataType type) {
 		rassert(type == DataType8u || type == DataType16u || type == DataType32f, 5462312324, typeName(type));
 		std::string type_name = toupper(typeName(type));
@@ -34,6 +42,18 @@ namespace avk2 {
 		std::string type_name = to_string(nchannels) + "x" + toupper(typeName(type));
 		rassert(vulkan_binaries_image_interpolation.count(type_name) > 0, 770673198, type_name);
 		return *vulkan_binaries_image_interpolation[type_name];
+	}
+	const ProgramBinaries& getRadixSort01LocalCountingKernel() {
+		return vulkan_binaries_radix_sort_01_local_counting_comp;
+	}
+	const ProgramBinaries& getRadixSort02GlobalPrefixesScanSumReductionKernel() {
+		return vulkan_binaries_radix_sort_02_global_prefixes_scan_sum_reduction_comp;
+	}
+	const ProgramBinaries& getRadixSort03GlobalPrefixesScanAccumulationKernel() {
+		return vulkan_binaries_radix_sort_03_global_prefixes_scan_accumulation_comp;
+	}
+	const ProgramBinaries& getRadixSort04ScatterKernel() {
+		return vulkan_binaries_radix_sort_04_scatter_comp;
 	}
 	std::vector<const ProgramBinaries*> getRasterizeKernel() {
 		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_frag};

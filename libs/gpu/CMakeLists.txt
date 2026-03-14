@@ -73,6 +73,7 @@ set(CUDA_SOURCES
 set (SOURCES_TEST
         libgpu/opencl/tests/kernels/kernels.cpp
         libgpu/opencl/tests/aplusb_test.cpp
+        libgpu/opencl/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/kernels/kernels.cpp
         libgpu/vulkan/tests/aplusb_test.cpp
         libgpu/vulkan/tests/atomic_add_test.cpp
@@ -81,6 +82,7 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/image_conversion_from_float_to_T_test.cpp
         libgpu/vulkan/tests/interpolation_test.cpp
         libgpu/vulkan/tests/main.cpp
+        libgpu/vulkan/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/rasterization_blending_test.cpp
         libgpu/vulkan/tests/rasterization_test.cpp
         libgpu/device_test.cpp
@@ -186,6 +188,11 @@ endfunction (compile_opencl)
 set (OPENCL_SOURCES)
 compile_opencl(HEADERS libgpu/opencl/cl/dummy_kernel.cl OPENCL_SOURCES DEFINES)
 compile_opencl(HEADERS libgpu/opencl/tests/kernels/aplusb.cl OPENCL_SOURCES DEFINES)
+compile_opencl(HEADERS libgpu/opencl/tests/kernels/fill_buffer_with_zeros.cl OPENCL_SOURCES DEFINES)
+compile_opencl(HEADERS libgpu/opencl/tests/kernels/radix_sort_01_local_counting.cl OPENCL_SOURCES DEFINES)
+compile_opencl(HEADERS libgpu/opencl/tests/kernels/radix_sort_02_global_prefixes_scan_sum_reduction.cl OPENCL_SOURCES DEFINES)
+compile_opencl(HEADERS libgpu/opencl/tests/kernels/radix_sort_03_global_prefixes_scan_accumulation.cl OPENCL_SOURCES DEFINES)
+compile_opencl(HEADERS libgpu/opencl/tests/kernels/radix_sort_04_scatter.cl OPENCL_SOURCES DEFINES)
 
 set(IMAGE_NCHANNELS 1 2 3 4) # from 1 to VK_MAX_NCHANNELS, so if IMAGE_NCHANNELS changes - VK_MAX_NCHANNELS in defines.h should be updated
 set(IMAGE_TYPES 8u 16u 32f)
@@ -209,9 +216,14 @@ set(VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/aplusb.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/atomic_add.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/batched_binary_search.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/fill_buffer_with_zeros.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.vert VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize_blending.frag VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_01_local_counting.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_02_global_prefixes_scan_sum_reduction.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_03_global_prefixes_scan_accumulation.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_04_scatter.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/write_value_at_index.comp VULKAN_DEFINES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_interpolation.comp VULKAN_DEFINES TEMPLATE_DEFINES_NC_TYPES TEMPLATE_SUFFIXES_NC_TYPES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_conversion_from_float_to_T.comp VULKAN_DEFINES TEMPLATE_DEFINES_TYPES TEMPLATE_SUFFIXES_TYPES)
