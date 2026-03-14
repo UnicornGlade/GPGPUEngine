@@ -86,6 +86,13 @@ set (SOURCES_TEST
         libgpu/device_test.cpp
         )
 
+if (GPU_CUDA_SUPPORT)
+    list(APPEND SOURCES_TEST
+        libgpu/cuda/tests/kernels/aplusb.cu
+        libgpu/cuda/tests/aplusb_test.cpp
+    )
+endif ()
+
 option(GPU_CUDA_SUPPORT "CUDA support." OFF)
 
 set (LIBRARIES
