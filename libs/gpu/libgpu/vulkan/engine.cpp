@@ -364,13 +364,15 @@ public:
 		vk::PhysicalDeviceUniformBufferStandardLayoutFeatures buffer_std_layout_features(true);
                 void * pNextFeature = &buffer_std_layout_features;
 
-		// We require VK_EXT_shader_atomic_float extension to use atomicAdd(float[], float),
-		// it has wide support - https://vulkan.gpuinfo.org/listdevicescoverage.php?extension=VK_EXT_shader_atomic_float
-		device_enabled_extensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
-		vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features;
-		atomic_float_features.setShaderBufferFloat32AtomicAdd(true);
-		atomic_float_features.setPNext(pNextFeature);
-                pNextFeature = &atomic_float_features;
+		if (USE_NATIVE_ATOMIC_ADD_FLOAT) {
+			// We require VK_EXT_shader_atomic_float extension to use atomicAdd(float[], float),
+			// it has wide support - https://vulkan.gpuinfo.org/listdevicescoverage.php?extension=VK_EXT_shader_atomic_float
+			device_enabled_extensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+			vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features;
+			atomic_float_features.setShaderBufferFloat32AtomicAdd(true);
+			atomic_float_features.setPNext(pNextFeature);
+			pNextFeature = &atomic_float_features;
+		}
 
 		vk::PhysicalDeviceFeatures2 device_enabled_features2;
 		if (isMoltenVK()) {

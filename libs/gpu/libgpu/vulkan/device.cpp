@@ -163,10 +163,18 @@ bool avk2::Device::init(const vk::raii::Instance &instance, bool silent)
 		if (!silent) std::cerr << "Vulkan device " << name << " skipped: no shader non semantic info extension (required for debugPrintfEXT(...))" << std::endl;
 		return false;
 	}
+	if (USE_NATIVE_ATOMIC_ADD_FLOAT) {
+		if (!extensions.count(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)) {
+			if (!silent) std::cerr << "Vulkan device " << name << " skipped: no VK_EXT_shader_atomic_float extension" << std::endl; // to use atomicAdd(float[], float), see support - https://vulkan.gpuinfo.org/listdevicescoverage.php?extension=VK_EXT_shader_atomic_float
+			return false;
+		}
 
-	if (!extensions.count(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)) {
-		if (!silent) std::cerr << "Vulkan device " << name << " skipped: no VK_EXT_shader_atomic_float extension" << std::endl; // to use atomicAdd(float[], float), see support - https://vulkan.gpuinfo.org/listdevicescoverage.php?extension=VK_EXT_shader_atomic_float
-		return false;
+		auto atomic_float_features2 = vk_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT>();
+		vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features = atomic_float_features2.get<vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT>();
+		if (!atomic_float_features.shaderBufferFloat32AtomicAdd) {
+			if (!silent) std::cerr << "Vulkan device " << name << " skipped: no shaderBufferFloat32AtomicAdd feature support" << std::endl; // to use atomicAdd(float[], float), see support - https://vulkan.gpuinfo.org/listdevicescoverage.php?extension=VK_EXT_shader_atomic_float
+			return false;
+		}
 	}
 
 	std::vector<vk::FormatFeatureFlagBits> generic_image_types_required_features = {

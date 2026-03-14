@@ -16,6 +16,8 @@
 
 #define VK_SUBGROUP_SIZE                                        32
 
+#define USE_NATIVE_ATOMIC_ADD_FLOAT                 0 // relies on VK_EXT_shader_atomic_float
+
 #ifndef NDEBUG
 	#define DEBUG_PRINTF_EXT_ENABLED		1 // enable in Debug build
 #else
