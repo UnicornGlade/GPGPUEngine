@@ -5,7 +5,7 @@
 #include <optional>
 #include <cstdint>
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 int setenv(const char *name, const char *value, int overwrite);
 #else
 #include <stdlib.h> // for setenv

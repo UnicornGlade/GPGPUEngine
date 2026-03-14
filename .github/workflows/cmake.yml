@@ -7,62 +7,155 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            shell: bash
+            run_tests: true
+          - name: macOS
+            os: macos-latest
+            shell: bash
+            run_tests: false
+          - name: Windows
+            os: windows-2022
+            shell: pwsh
+            run_tests: false
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
 
     steps:
+    - uses: actions/checkout@v4
+
+    - uses: lukka/get-cmake@latest
+
     - name: Delete huge unnecessary tools folder
+      if: matrix.os == 'ubuntu-24.04'
       run: rm -rf /opt/hostedtoolcache
 
-    - uses: actions/checkout@v2
-
-    - name: Install prerequisites
+    - name: Install Linux prerequisites
+      if: matrix.os == 'ubuntu-24.04'
       run: |
         sudo apt update
         sudo apt install -y g++-13
         sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 90
         sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 90
+        sudo bash scripts/linux/install_opencl_cpu_driver.sh
+        sudo bash scripts/linux/install_vulkan_cpu_driver.sh
+        clinfo
+        sudo bash scripts/linux/install_cuda_sdk.sh
+        sudo bash scripts/linux/install_vulkan_sdk.sh --no-validation-layers
+        sudo bash scripts/linux/install_dependencies.sh
 
-    - name: Install OpenCL CPU driver
-      run: sudo bash scripts/linux/install_opencl_cpu_driver.sh;
-
-    - name: Install Vulkan CPU driver
-      run: sudo bash scripts/linux/install_vulkan_cpu_driver.sh;
-
-    - name: Show clinfo full output
-      run: clinfo
-
-    - name: Install CUDA SDK
-      run: sudo bash scripts/linux/install_cuda_sdk.sh;
+    - name: Install macOS prerequisites
+      if: startsWith(matrix.os, 'macos')
+      run: |
+        brew update
+        brew install graphicsmagick molten-vk shaderc libomp googletest llvm pocl clinfo
+        echo "HOMEBREW_PREFIX=$(brew --prefix)" >> $GITHUB_ENV
+        echo "OpenMP_ROOT=$(brew --prefix libomp)" >> $GITHUB_ENV
+        echo "LLVM_ROOT=$(brew --prefix llvm)" >> $GITHUB_ENV
+        echo "POCL_ROOT=$(brew --prefix pocl)" >> $GITHUB_ENV
+        echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
+        echo "CXX=$(brew --prefix llvm)/bin/clang++" >> $GITHUB_ENV
+        echo "CPPFLAGS=-I$(brew --prefix libomp)/include $CPPFLAGS" >> $GITHUB_ENV
+        echo "LDFLAGS=-L$(brew --prefix libomp)/lib $LDFLAGS" >> $GITHUB_ENV
 
     - name: Install Vulkan SDK
-      run: sudo bash scripts/linux/install_vulkan_sdk.sh --no-validation-layers; # we don't compile validation layers on each CI run because it is too slow
+      if: startsWith(matrix.os, 'macos')
+      uses: humbletim/install-vulkan-sdk@v1.2
+      with:
+        version: 1.3.296.0
+        cache: true
 
-    - name: Install dependencies (gtest and graphicsmagick)
-      run: sudo bash scripts/linux/install_dependencies.sh;
+    - name: Install Vulkan SDK on Windows
+      if: matrix.os == 'windows-2022'
+      uses: jakoch/install-vulkan-sdk-action@v1
+      with:
+        vulkan_version: 1.3.296.0
+        install_runtime: true
+        cache: true
+        stripdown: true
 
-    - name: Configure CMake
-      run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DGPU_CUDA_SUPPORT=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+    - name: Setup vcpkg
+      if: matrix.os == 'windows-2022'
+      id: vcpkg
+      uses: johnwason/vcpkg-action@v7
+      with:
+        pkgs: gtest graphicsmagick
+        triplet: x64-windows-release
+        cache-key: windows-2022
+        token: ${{ github.token }}
+
+    - name: Install LLVM on Windows
+      if: matrix.os == 'windows-2022'
+      run: |
+        if (Test-Path "C:\Program Files\LLVM\bin\clang.exe") {
+          Write-Host "LLVM already present"
+        } else {
+          choco install llvm --no-progress -y
+        }
+
+    - name: Configure CMake on Linux
+      if: matrix.os == 'ubuntu-24.04'
+      run: >
+        cmake -B ${{ github.workspace }}/build
+        -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+        -DCMAKE_CUDA_ARCHITECTURES=75
+
+    - name: Configure CMake on macOS
+      if: startsWith(matrix.os, 'macos')
+      run: >
+        cmake -B ${{ github.workspace }}/build
+        -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+        -DCMAKE_C_COMPILER="${{ env.CC }}"
+        -DCMAKE_CXX_COMPILER="${{ env.CXX }}"
+        -DCMAKE_PREFIX_PATH="${{ env.HOMEBREW_PREFIX }};${{ env.OpenMP_ROOT }};${VULKAN_SDK}"
+        -DOpenMP_ROOT="${{ env.OpenMP_ROOT }}"
+        -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I${{ env.OpenMP_ROOT }}/include"
+        -DOpenMP_C_LIB_NAMES=libomp
+        -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${{ env.OpenMP_ROOT }}/include"
+        -DOpenMP_CXX_LIB_NAMES=libomp
+        -DOpenMP_libomp_LIBRARY="${{ env.OpenMP_ROOT }}/lib/libomp.dylib"
+        -DGLSLC_BIN="$(which glslc)"
+
+    - name: Configure CMake on Windows
+      if: matrix.os == 'windows-2022'
+      run: |
+        cmake -B ${{ github.workspace }}/build `
+          -G "Visual Studio 17 2022" `
+          -A x64 `
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+          ${{ steps.vcpkg.outputs.vcpkg-cmake-config }} `
+          -DCMAKE_PREFIX_PATH="$env:VULKAN_SDK" `
+          -DGLSLC_BIN="$env:VULKAN_SDK\Bin\glslc.exe" `
+          -DSPIR_CLANG_BIN="C:\Program Files\LLVM\bin\clang.exe"
 
     - name: Build
-      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel $(nproc)
-
-    - name: Make CUDA stubs visible (no driver on runner)
-      run: |
-        sudo ln -sf /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-                    /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so.1
-        echo "LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib/stubs:/usr/local/cuda/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+      run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel --target libgpu_test main_aplusb main_linear_bvh
 
     - name: Run libs/gpu unit-tests
-      working-directory: ${{github.workspace}}/build
-      run: AVK_ENABLE_VALIDATION_LAYERS=false ./libs/gpu/libgpu_test --gtest_filter=-vulkan.*
+      if: matrix.run_tests
+      working-directory: ${{ github.workspace }}/build/libs/gpu
+      env:
+        AVK_ENABLE_VALIDATION_LAYERS: "false"
+      run: ./libgpu_test
 
     - name: Run main_aplusb
-      working-directory: ${{github.workspace}}/build
+      if: matrix.run_tests
+      working-directory: ${{ github.workspace }}/build
       run: |
         ./main_aplusb 0
         ./main_aplusb 1
 
     - name: Run main_linear_bvh
-      working-directory: ${{github.workspace}}/
-      run: |
-        ./build/main_linear_bvh 0
+      if: matrix.run_tests
+      working-directory: ${{ github.workspace }}
+      run: ./build/main_linear_bvh 0

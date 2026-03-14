@@ -8,7 +8,7 @@
 #include "exceptions.h"
 
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 // see https://stackoverflow.com/a/23616164
 int setenv(const char *name, const char *value, int overwrite)
 {

@@ -28,9 +28,11 @@ find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+    set(OPENMP_CXX_LINK_TARGET OpenMP::OpenMP_CXX)
 else ()
     # Это не ошибка т.к. если нет OpenMP - код будет работать, просто директивы распараллеливания ничего не будут делать
     message(WARNING "OpenMP not found!")
+    set(OPENMP_CXX_LINK_TARGET "")
 endif ()
 
 add_subdirectory(libs)
@@ -115,7 +117,7 @@ add_executable(main_aplusb     src/main_aplusb.cpp)
 add_executable(main_linear_bvh src/main_linear_bvh.cpp)
 
 target_link_libraries(main_aplusb     ${PROJECT_NAME}_core)
-target_link_libraries(main_linear_bvh ${PROJECT_NAME}_core)
+target_link_libraries(main_linear_bvh ${PROJECT_NAME}_core ${OPENMP_CXX_LINK_TARGET})
 
 if (GPU_CUDA_SUPPORT)
     target_include_directories(main_aplusb     PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
