@@ -1,0 +1,11 @@
+#pragma once
+
+#define BLOCK_THREADS 256
+#define GROUP_SIZE BLOCK_THREADS
+#define BITS_AT_A_TIME 4
+#define BINS_CNT 16
+#define NUM_BOXES BINS_CNT
+#define RADIX_MASK (BINS_CNT - 1)
+#define BITS_IN_RADIX_SORT_ITERATION BITS_AT_A_TIME
+#define WARP_LG 5
+#define RASSERT_ENABLED 0
