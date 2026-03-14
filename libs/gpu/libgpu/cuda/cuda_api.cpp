@@ -116,12 +116,18 @@ std::string formatDriverError(CUresult code)
 }
 
 typedef CUresult				(CUDAAPI * p_pfn_cuDeviceGet)				(CUdevice *, int);
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+typedef CUresult				(CUDAAPI * p_pfn_cuCtxCreate)				(CUcontext *, CUctxCreateParams *, unsigned int, CUdevice);
+#else
 typedef CUresult				(CUDAAPI * p_pfn_cuCtxCreate)				(CUcontext *, unsigned int, CUdevice);
+#endif
 typedef CUresult				(CUDAAPI * p_pfn_cuCtxDestroy)				(CUcontext);
+typedef CUresult				(CUDAAPI * p_pfn_cuDeviceGetAttribute)		(int *, CUdevice_attribute, CUdevice);
 
 p_pfn_cuDeviceGet				pfn_cuDeviceGet				= 0;
 p_pfn_cuCtxCreate				pfn_cuCtxCreate				= 0;
 p_pfn_cuCtxDestroy				pfn_cuCtxDestroy			= 0;
+p_pfn_cuDeviceGetAttribute		pfn_cuDeviceGetAttribute	= 0;
 
 bool cuda_api_init()
 {
@@ -133,30 +139,50 @@ bool cuda_api_init()
 		return false;
 
 	pfn_cuDeviceGet				= (p_pfn_cuDeviceGet)				cudaGetProcAddress(lib, "cuDeviceGet");
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+	pfn_cuCtxCreate				= (p_pfn_cuCtxCreate)				cudaGetProcAddress(lib, "cuCtxCreate_v4");
+#else
 	pfn_cuCtxCreate				= (p_pfn_cuCtxCreate)				cudaGetProcAddress(lib, "cuCtxCreate_v2");
+#endif
 	pfn_cuCtxDestroy			= (p_pfn_cuCtxDestroy)				cudaGetProcAddress(lib, "cuCtxDestroy_v2");
+	pfn_cuDeviceGetAttribute	= (p_pfn_cuDeviceGetAttribute)		cudaGetProcAddress(lib, "cuDeviceGetAttribute");
 
-	return true;
+	return pfn_cuDeviceGet && pfn_cuCtxCreate && pfn_cuCtxDestroy && pfn_cuDeviceGetAttribute;
 }
 
-CUresult CUDAAPI cuDeviceGet(CUdevice *device, int ordinal)
+CUresult CUDAAPI cuDeviceGetDynamic(CUdevice *device, int ordinal)
 {
 	if (!pfn_cuDeviceGet) return CUDA_ERROR_NOT_INITIALIZED;
 
 	return pfn_cuDeviceGet(device, ordinal);
 }
 
-CUresult CUDAAPI cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev)
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+CUresult CUDAAPI cuCtxCreateDynamic(CUcontext *pctx, CUctxCreateParams *ctxCreateParams, unsigned int flags, CUdevice dev)
+#else
+CUresult CUDAAPI cuCtxCreateDynamic(CUcontext *pctx, unsigned int flags, CUdevice dev)
+#endif
 {
 	if (!pfn_cuCtxCreate) return CUDA_ERROR_NOT_INITIALIZED;
 
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+	return pfn_cuCtxCreate(pctx, ctxCreateParams, flags, dev);
+#else
 	return pfn_cuCtxCreate(pctx, flags, dev);
+#endif
 }
 
-CUresult CUDAAPI cuCtxDestroy(CUcontext ctx)
+CUresult CUDAAPI cuCtxDestroyDynamic(CUcontext ctx)
 {
 	if (!pfn_cuCtxDestroy) return CUDA_ERROR_NOT_INITIALIZED;
 
 	return pfn_cuCtxDestroy(ctx);
+}
+
+CUresult CUDAAPI cuDeviceGetAttributeDynamic(int *pi, CUdevice_attribute attrib, CUdevice dev)
+{
+	if (!pfn_cuDeviceGetAttribute) return CUDA_ERROR_NOT_INITIALIZED;
+
+	return pfn_cuDeviceGetAttribute(pi, attrib, dev);
 }
 #endif

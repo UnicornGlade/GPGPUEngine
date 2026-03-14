@@ -88,7 +88,7 @@ Context::Data::~Data()
 #ifndef CUDA_USE_PRIMARY_CONTEXT
 	if (cuda_context) {
 		CUresult err;
-		CUDA_TRACE(err = cuCtxDestroy(cuda_context));
+		CUDA_TRACE(err = cuCtxDestroyDynamic(cuda_context));
 		if (CUDA_SUCCESS != err)
 			std::cerr << "Warning: cuCtxDestroy failed: " << cuda::formatDriverError(err) << std::endl;
 	}
@@ -212,11 +212,11 @@ void Context::activate()
 			// http://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__DRIVER.html#axzz4g8KX5QV5
 
 			CUdevice device = 0;
-			CU_SAFE_CALL( cuDeviceGet(&device, data_ref_->cuda_device) );
+			CU_SAFE_CALL( cuDeviceGetDynamic(&device, data_ref_->cuda_device) );
 
                         int computeMode = 9999;
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
-                        CU_SAFE_CALL( cuDeviceGetAttribute(&computeMode, CU_DEVICE_ATTRIBUTE_COMPUTE_MODE, device) );
+                        CU_SAFE_CALL( cuDeviceGetAttributeDynamic(&computeMode, CU_DEVICE_ATTRIBUTE_COMPUTE_MODE, device) );
 #else
                         // CUDA <= 12.x: keep old runtime field
                         computeMode = data_ref_->cuda_device_prop.computeMode;
@@ -240,10 +240,10 @@ void Context::activate()
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
                         // CUDA 13+: new signature with CUctxCreateParams
                         CUctxCreateParams params{};
-                        CUDA_TRACE(err = cuCtxCreate(&data_ref_->cuda_context, &params, 0, device));
+                        CUDA_TRACE(err = cuCtxCreateDynamic(&data_ref_->cuda_context, &params, 0, device));
 #else
                         // CUDA 12.x and older
-                        CUDA_TRACE(err = cuCtxCreate(&data_ref_->cuda_context, 0, device));
+                        CUDA_TRACE(err = cuCtxCreateDynamic(&data_ref_->cuda_context, 0, device));
 #endif
 
 			cuda::reportErrorCU(err, __LINE__, "cuCtxCreate failed: ");
