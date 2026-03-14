@@ -89,7 +89,12 @@ set (SOURCES_TEST
 if (GPU_CUDA_SUPPORT)
     list(APPEND SOURCES_TEST
         libgpu/cuda/tests/kernels/aplusb.cu
+        libgpu/cuda/tests/kernels/radix_sort_01_local_counting.cu
+        libgpu/cuda/tests/kernels/radix_sort_02_global_prefixes_scan_sum_reduction.cu
+        libgpu/cuda/tests/kernels/radix_sort_03_global_prefixes_scan_accumulation.cu
+        libgpu/cuda/tests/kernels/radix_sort_04_scatter.cu
         libgpu/cuda/tests/aplusb_test.cpp
+        libgpu/cuda/tests/radix_sort_test.cpp
     )
 endif ()
 
