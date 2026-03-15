@@ -608,25 +608,27 @@ vk::raii::CommandBuffer avk2::VulkanEngine::createCommandBuffer()
 	return command_buffer;
 }
 
-std::shared_ptr<vk::raii::Fence> avk2::VulkanEngine::acquireInflightComputeFence()
+std::shared_ptr<vk::raii::Fence> avk2::VulkanEngine::acquireInflightFence()
 {
-	Lock lock(inflight_compute_launches_mutex_);
-	if (!available_compute_fences_.empty()) {
-		std::shared_ptr<vk::raii::Fence> fence = available_compute_fences_.front();
-		available_compute_fences_.pop_front();
+	Lock compute_lock(inflight_compute_launches_mutex_);
+	Lock render_lock(inflight_render_launches_mutex_);
+	if (!available_async_fences_.empty()) {
+		std::shared_ptr<vk::raii::Fence> fence = available_async_fences_.front();
+		available_async_fences_.pop_front();
 		getDevice().resetFences(**fence);
 		return fence;
 	}
 	return std::make_shared<vk::raii::Fence>(getDevice(), vk::FenceCreateInfo());
 }
 
-void avk2::VulkanEngine::recycleInflightComputeFence(std::shared_ptr<vk::raii::Fence> fence)
+void avk2::VulkanEngine::recycleInflightFence(std::shared_ptr<vk::raii::Fence> fence)
 {
 	if (!fence) {
 		return;
 	}
-	Lock lock(inflight_compute_launches_mutex_);
-	available_compute_fences_.push_back(std::move(fence));
+	Lock compute_lock(inflight_compute_launches_mutex_);
+	Lock render_lock(inflight_render_launches_mutex_);
+	available_async_fences_.push_back(std::move(fence));
 }
 
 void avk2::VulkanEngine::submitCommandBuffer(const vk::raii::CommandBuffer &command_buffer, vk::raii::Fence &fence)
@@ -666,9 +668,14 @@ avk2::VulkanEngine::VulkanEngine()
 	: pipeline_cache_capacity_per_family_(4),
 	  vk_device_id_(std::numeric_limits<uint64_t>::max()),
 	  max_inflight_compute_launches_(32),
+	  max_inflight_render_launches_(32),
 	  async_compute_timestamps_enabled_(true),
+	  async_render_timestamps_enabled_(true),
+	  async_render_enabled_(true),
 	  next_async_compute_query_(0),
+	  next_async_render_query_(0),
 	  next_compute_submit_id_(1),
+	  next_render_submit_id_(1),
 	  timestamp_period_nanos_(1.0f),
 	  device_(vk_device_id_)
 {}
@@ -676,6 +683,7 @@ avk2::VulkanEngine::VulkanEngine()
 avk2::VulkanEngine::~VulkanEngine()
 {
 	waitForAllInflightComputeLaunches();
+	waitForAllInflightRenderLaunches();
 	if (cachedPipelinesCount() != 0) {
 		std::cerr << "VulkanEngine: uncleared cached pipelines found" << std::endl;
 	}
@@ -749,12 +757,26 @@ void avk2::VulkanEngine::setMaxInflightComputeLaunches(size_t max_inflight)
 	max_inflight_compute_launches_ = max_inflight;
 }
 
+void avk2::VulkanEngine::setMaxInflightRenderLaunches(size_t max_inflight)
+{
+	rassert(max_inflight > 0, 2026031517415800001);
+	max_inflight_render_launches_ = max_inflight;
+}
+
 void avk2::VulkanEngine::resetAsyncComputeStats()
 {
 	waitForAllInflightComputeLaunches();
 	async_compute_stats_ = {};
 	completed_compute_intervals_.clear();
 	next_async_compute_query_ = 0;
+}
+
+void avk2::VulkanEngine::resetAsyncRenderStats()
+{
+	waitForAllInflightRenderLaunches();
+	async_render_stats_ = {};
+	completed_render_intervals_.clear();
+	next_async_render_query_ = 0;
 }
 
 uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
@@ -764,6 +786,16 @@ uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
 	rassert(next_async_compute_query_ + count <= 262144, 2026031517255500003, next_async_compute_query_, count);
 	uint32_t first_query = next_async_compute_query_;
 	next_async_compute_query_ += count;
+	return first_query;
+}
+
+uint32_t avk2::VulkanEngine::allocateRenderTimestampQueries(uint32_t count)
+{
+	rassert(async_render_timestamps_enabled_, 2026031517415800002);
+	rassert(async_render_query_pool_, 2026031517415800003);
+	rassert(next_async_render_query_ + count <= 262144, 2026031517415800004, next_async_render_query_, count);
+	uint32_t first_query = next_async_render_query_;
+	next_async_render_query_ += count;
 	return first_query;
 }
 
@@ -782,6 +814,23 @@ void avk2::VulkanEngine::appendCompletedComputeInterval(const InflightComputeLau
 		completed_compute_intervals_.push_back({timestamps[0], timestamps[1]});
 	}
 	++async_compute_stats_.launches_count;
+}
+
+void avk2::VulkanEngine::appendCompletedRenderInterval(const InflightRenderLaunch &launch)
+{
+	profiling::ScopedRange scope("vk async render collect timestamps", 0xFF6C3483);
+	if (!async_render_timestamps_enabled_) {
+		++async_render_stats_.launches_count;
+		return;
+	}
+	uint64_t timestamps[2] = {0, 0};
+	vk::Result result = (*getDevice()).getQueryPoolResults(**async_render_query_pool_, launch.query_start, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+	VK_CHECK_RESULT(result, 2026031517415800005);
+
+	if (timestamps[0] <= timestamps[1]) {
+		completed_render_intervals_.push_back({timestamps[0], timestamps[1]});
+	}
+	++async_render_stats_.launches_count;
 }
 
 void avk2::VulkanEngine::waitForInflightComputeLaunch(InflightComputeLaunch &launch)
@@ -819,7 +868,7 @@ void avk2::VulkanEngine::eraseInflightComputeLaunch(uint64_t submit_id)
 		}
 	}
 	if (removed_launch.has_value()) {
-		recycleInflightComputeFence(std::move(removed_launch->fence));
+		recycleInflightFence(std::move(removed_launch->fence));
 	}
 }
 
@@ -850,6 +899,75 @@ void avk2::VulkanEngine::retireCompletedInflightComputeLaunches()
 			throw;
 		}
 		eraseInflightComputeLaunch(ready_launch->submit_id);
+	}
+}
+
+void avk2::VulkanEngine::waitForInflightRenderLaunch(InflightRenderLaunch &launch)
+{
+	{
+		profiling::ScopedRange scope("vk async render wait fence", 0xFF884EA0);
+		VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(*launch.fence), true, VULKAN_TIMEOUT_NANOSECS), 2026031517415800006);
+	}
+	finishInflightRenderLaunchAfterFence(launch);
+}
+
+void avk2::VulkanEngine::finishInflightRenderLaunchAfterFence(InflightRenderLaunch &launch)
+{
+	{
+		profiling::ScopedRange scope("vk async render append interval", 0xFF5DADE2);
+		appendCompletedRenderInterval(launch);
+	}
+	if (launch.pipeline && launch.rassert_slot >= 0) {
+		profiling::ScopedRange scope("vk async render check rassert", 0xFFCB4335);
+		launch.pipeline->checkRassertCode(static_cast<size_t>(launch.rassert_slot));
+	}
+}
+
+void avk2::VulkanEngine::eraseInflightRenderLaunch(uint64_t submit_id)
+{
+	std::optional<InflightRenderLaunch> removed_launch;
+	{
+		Lock lock(inflight_render_launches_mutex_);
+		for (auto it = inflight_render_launches_.begin(); it != inflight_render_launches_.end(); ++it) {
+			if (it->submit_id == submit_id) {
+				removed_launch = std::move(*it);
+				inflight_render_launches_.erase(it);
+				break;
+			}
+		}
+	}
+	if (removed_launch.has_value()) {
+		recycleInflightFence(std::move(removed_launch->fence));
+	}
+}
+
+void avk2::VulkanEngine::retireCompletedInflightRenderLaunches()
+{
+	profiling::ScopedRange retire_scope("vk async render retire completed launches", 0xFF7D3C98);
+	for (;;) {
+		std::optional<InflightRenderLaunch> ready_launch;
+		{
+			profiling::ScopedRange scope("vk async render scan fence status", 0xFFAF7AC5);
+			Lock lock(inflight_render_launches_mutex_);
+			for (const InflightRenderLaunch &launch : inflight_render_launches_) {
+				vk::Result fence_status = (*getDevice()).getFenceStatus(vk::Fence(*launch.fence));
+				if (fence_status == vk::Result::eSuccess) {
+					ready_launch = launch;
+					break;
+				}
+			}
+		}
+		if (!ready_launch.has_value()) {
+			return;
+		}
+		try {
+			profiling::ScopedRange scope("vk async render retire one launch", 0xFFF5B041);
+			finishInflightRenderLaunchAfterFence(*ready_launch);
+		} catch (...) {
+			eraseInflightRenderLaunch(ready_launch->submit_id);
+			throw;
+		}
+		eraseInflightRenderLaunch(ready_launch->submit_id);
 	}
 }
 
@@ -910,6 +1028,44 @@ void avk2::VulkanEngine::waitForConflictingInflightLaunches(const std::vector<Re
 	}
 }
 
+void avk2::VulkanEngine::waitForConflictingInflightRenderLaunches(const std::vector<ResourceAccessRecord> &resource_accesses)
+{
+	for (;;) {
+		retireCompletedInflightRenderLaunches();
+
+		std::optional<size_t> conflicting_index;
+		{
+			Lock lock(inflight_render_launches_mutex_);
+			for (size_t i = 0; i < inflight_render_launches_.size(); ++i) {
+				if (doResourceAccessesConflict(resource_accesses, inflight_render_launches_[i].resource_accesses)) {
+					conflicting_index = i;
+					break;
+				}
+			}
+		}
+
+		if (!conflicting_index.has_value()) {
+			return;
+		}
+
+		InflightRenderLaunch launch;
+		{
+			Lock lock(inflight_render_launches_mutex_);
+			launch = inflight_render_launches_[*conflicting_index];
+		}
+		timer wait_timer;
+		try {
+			waitForInflightRenderLaunch(launch);
+		} catch (...) {
+			eraseInflightRenderLaunch(launch.submit_id);
+			throw;
+		}
+		async_render_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+		++async_render_stats_.waits_due_to_limit;
+		eraseInflightRenderLaunch(launch.submit_id);
+	}
+}
+
 void avk2::VulkanEngine::waitForAllInflightComputeLaunches()
 {
 	for (;;) {
@@ -938,14 +1094,44 @@ void avk2::VulkanEngine::waitForAllInflightComputeLaunches()
 	}
 }
 
+void avk2::VulkanEngine::waitForAllInflightRenderLaunches()
+{
+	for (;;) {
+		retireCompletedInflightRenderLaunches();
+
+		InflightRenderLaunch launch;
+		bool has_launch = false;
+		{
+			Lock lock(inflight_render_launches_mutex_);
+			if (!inflight_render_launches_.empty()) {
+				launch = inflight_render_launches_.front();
+				has_launch = true;
+			}
+		}
+		if (!has_launch) {
+			break;
+		}
+
+		try {
+			waitForInflightRenderLaunch(launch);
+		} catch (...) {
+			eraseInflightRenderLaunch(launch.submit_id);
+			throw;
+		}
+		eraseInflightRenderLaunch(launch.submit_id);
+	}
+}
+
 void avk2::VulkanEngine::waitForBuffer(const avk2::raii::BufferData &buffer)
 {
 	waitForConflictingInflightLaunches({{&buffer, ResourceAccessKind::ReadWrite}});
+	waitForConflictingInflightRenderLaunches({{&buffer, ResourceAccessKind::ReadWrite}});
 }
 
 void avk2::VulkanEngine::waitForImage(const avk2::raii::ImageData &image)
 {
 	waitForConflictingInflightLaunches({{&image, ResourceAccessKind::ReadWrite}});
+	waitForConflictingInflightRenderLaunches({{&image, ResourceAccessKind::ReadWrite}});
 }
 
 int avk2::VulkanEngine::acquireRassertSlot(const std::shared_ptr<VulkanKernel> &kernel)
@@ -994,6 +1180,55 @@ int avk2::VulkanEngine::acquireRassertSlot(const std::shared_ptr<VulkanKernel> &
 		async_compute_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
 		++async_compute_stats_.waits_due_to_limit;
 		eraseInflightComputeLaunch(oldest.submit_id);
+	}
+}
+
+int avk2::VulkanEngine::acquireRasterRassertSlot(const std::shared_ptr<VulkanRasterPipeline> &pipeline)
+{
+	rassert(pipeline && pipeline->isRassertUsed(), 2026031517415800007);
+	for (;;) {
+		retireCompletedInflightRenderLaunches();
+
+		bool slot_in_use[2] = {false, false};
+		{
+			Lock lock(inflight_render_launches_mutex_);
+			for (const InflightRenderLaunch &launch : inflight_render_launches_) {
+				if (launch.pipeline.get() != pipeline.get() || launch.rassert_slot < 0) {
+					continue;
+				}
+				slot_in_use[launch.rassert_slot] = true;
+			}
+		}
+		for (int slot = 0; slot < 2; ++slot) {
+			if (!slot_in_use[slot]) {
+				pipeline->resetRassertCode(static_cast<size_t>(slot));
+				return slot;
+			}
+		}
+
+		InflightRenderLaunch oldest;
+		bool found = false;
+		{
+			Lock lock(inflight_render_launches_mutex_);
+			for (const InflightRenderLaunch &launch : inflight_render_launches_) {
+				if (launch.pipeline.get() == pipeline.get() && launch.rassert_slot >= 0) {
+					oldest = launch;
+					found = true;
+					break;
+				}
+			}
+		}
+		rassert(found, 2026031517415800008);
+		timer wait_timer;
+		try {
+			waitForInflightRenderLaunch(oldest);
+		} catch (...) {
+			eraseInflightRenderLaunch(oldest.submit_id);
+			throw;
+		}
+		async_render_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+		++async_render_stats_.waits_due_to_limit;
+		eraseInflightRenderLaunch(oldest.submit_id);
 	}
 }
 
@@ -1068,6 +1303,77 @@ void avk2::VulkanEngine::logAsyncComputeStats(const std::string &label, bool wai
 			  << std::endl;
 }
 
+avk2::AsyncRenderStats avk2::VulkanEngine::getAsyncRenderStats(bool wait_for_all)
+{
+	if (wait_for_all) {
+		waitForAllInflightRenderLaunches();
+	} else {
+		retireCompletedInflightRenderLaunches();
+	}
+
+	AsyncRenderStats stats = async_render_stats_;
+	if (completed_render_intervals_.empty()) {
+		return stats;
+	}
+
+	std::vector<CompletedRenderInterval> intervals = completed_render_intervals_;
+	std::sort(intervals.begin(), intervals.end(), [](const CompletedRenderInterval &lhs, const CompletedRenderInterval &rhs) {
+		return lhs.start_ticks < rhs.start_ticks;
+	});
+
+	uint64_t total_ticks = intervals.back().end_ticks - intervals.front().start_ticks;
+	uint64_t busy_ticks = 0;
+	uint64_t current_start = intervals.front().start_ticks;
+	uint64_t current_end = intervals.front().end_ticks;
+	std::vector<uint64_t> gap_ticks;
+	for (size_t i = 1; i < intervals.size(); ++i) {
+		if (intervals[i].start_ticks > current_end) {
+			busy_ticks += current_end - current_start;
+			gap_ticks.push_back(intervals[i].start_ticks - current_end);
+			current_start = intervals[i].start_ticks;
+			current_end = intervals[i].end_ticks;
+		} else {
+			current_end = std::max(current_end, intervals[i].end_ticks);
+		}
+	}
+	busy_ticks += current_end - current_start;
+	uint64_t idle_ticks = total_ticks - busy_ticks;
+
+	stats.total_seconds = ticksToSeconds(total_ticks, timestamp_period_nanos_);
+	stats.busy_seconds = ticksToSeconds(busy_ticks, timestamp_period_nanos_);
+	stats.idle_seconds = ticksToSeconds(idle_ticks, timestamp_period_nanos_);
+	if (stats.total_seconds > 0.0) {
+		stats.busy_percent = 100.0 * stats.busy_seconds / stats.total_seconds;
+		stats.idle_percent = 100.0 * stats.idle_seconds / stats.total_seconds;
+	}
+	stats.gaps_count = gap_ticks.size();
+	if (!gap_ticks.empty()) {
+		std::sort(gap_ticks.begin(), gap_ticks.end());
+		stats.median_gap_seconds = ticksToSeconds(gap_ticks[gap_ticks.size() / 2], timestamp_period_nanos_);
+		stats.max_gap_seconds = ticksToSeconds(gap_ticks.back(), timestamp_period_nanos_);
+	}
+	return stats;
+}
+
+void avk2::VulkanEngine::logAsyncRenderStats(const std::string &label, bool wait_for_all)
+{
+	AsyncRenderStats stats = getAsyncRenderStats(wait_for_all);
+	std::cout << "Vulkan async render stats";
+	if (!label.empty()) {
+		std::cout << " [" << label << "]";
+	}
+	std::cout << ": total=" << stats.total_seconds << " s"
+			  << ", busy=" << stats.busy_seconds << " s (" << stats.busy_percent << "%)"
+			  << ", idle=" << stats.idle_seconds << " s (" << stats.idle_percent << "%)"
+			  << ", launches=" << stats.launches_count
+			  << ", gaps=" << stats.gaps_count
+			  << ", median_gap=" << stats.median_gap_seconds << " s"
+			  << ", max_gap=" << stats.max_gap_seconds << " s"
+			  << ", waits_due_to_limit=" << stats.waits_due_to_limit
+			  << ", wait_due_to_limit_total=" << stats.wait_due_to_limit_seconds << " s"
+			  << std::endl;
+}
+
 std::shared_ptr<avk2::VulkanKernel> avk2::VulkanEngine::getOrCreateComputeKernel(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanKernel>()> &create_fn)
 {
 	auto family_it = compute_pipeline_caches_.find(family_key);
@@ -1120,15 +1426,22 @@ void avk2::VulkanEngine::init(uint64_t vk_device_id, bool enable_validation_laye
 	rassert(inited_ok, 629844440093078);
 	timestamp_period_nanos_ = getPhysicalDevice().getProperties().limits.timestampPeriod;
 	async_compute_timestamps_enabled_ = isEnvEnabled("GPGPU_ENABLE_VULKAN_TIMESTAMP_QUERIES", true);
+	async_render_timestamps_enabled_ = async_compute_timestamps_enabled_;
+	async_render_enabled_ = isEnvEnabled("GPGPU_ENABLE_VULKAN_ASYNC_RENDER", true);
 	if (async_compute_timestamps_enabled_) {
 		vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, 262144);
 		async_compute_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
+		async_render_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
 	} else {
 		async_compute_query_pool_.reset();
+		async_render_query_pool_.reset();
 	}
 	next_async_compute_query_ = 0;
+	next_async_render_query_ = 0;
 	next_compute_submit_id_ = 1;
+	next_render_submit_id_ = 1;
 	resetAsyncComputeStats();
+	resetAsyncRenderStats();
 
 	allocateStagingWriteBuffers();
 	allocateStagingReadBuffers();
@@ -1567,12 +1880,14 @@ void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, si
 void avk2::VulkanEngine::clearKernels()
 {
 	waitForAllInflightComputeLaunches();
+	waitForAllInflightRenderLaunches();
 	clearPipelineCaches();
 }
 
 void avk2::VulkanEngine::clearStagingBuffers()
 {
 	waitForAllInflightComputeLaunches();
+	waitForAllInflightRenderLaunches();
 	for (int i = 0; i < 2; ++i) {
 		staging_write_buffers_[i].reset();
 		staging_read_buffers_[i].reset();
@@ -1582,8 +1897,9 @@ void avk2::VulkanEngine::clearStagingBuffers()
 void avk2::VulkanEngine::clearFences()
 {
 	waitForAllInflightComputeLaunches();
+	waitForAllInflightRenderLaunches();
 	fences_.clear();
-	available_compute_fences_.clear();
+	available_async_fences_.clear();
 }
 
 avk2::VersionedBinary::VersionedBinary(const char *data, const size_t size)
@@ -2159,7 +2475,7 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 	timer gpu_t;
 	gpu_t.start();
-	std::shared_ptr<vk::raii::Fence> fence = context.vk()->acquireInflightComputeFence();
+	std::shared_ptr<vk::raii::Fence> fence = context.vk()->acquireInflightFence();
 	context.vk()->retireCompletedInflightComputeLaunches();
 	while (true) {
 		{
@@ -2273,30 +2589,36 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 	gpu::Context context;
 	std::shared_ptr<VulkanRasterPipeline> raster_pipeline = getRasterPipeline(context.vk(), params);
 	const std::vector<vk::DescriptorType> &descriptor_types = raster_pipeline->getDescriptorTypes();
+	const std::vector<DescriptorAccess> &descriptor_accesses = raster_pipeline->getDescriptorAccesses();
 	std::shared_ptr<vk::raii::DescriptorSet> descriptor_set;
 	std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
 	bool is_rassert_used = raster_pipeline->isRassertUsed();
-	gpu::gpu_mem_32u rassert_code_and_line_;
 	if (!descriptor_types.empty()) {
 		descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(raster_pipeline->descriptorSetLayout(), descriptor_types)));
 	}
+	int rassert_slot = -1;
 	if (is_rassert_used) {
 		std::vector<vk::DescriptorType> rassert_descriptor_types = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(raster_pipeline->shaderModuleInfos(), VK_RASSERT_CODE_SET);
+		rassert_slot = context.vk()->acquireRasterRassertSlot(raster_pipeline);
 		rassert_descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(raster_pipeline->descriptorSetLayoutRassert(), rassert_descriptor_types)));
-		rassert_code_and_line_.resizeN(4);
-		unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
-											  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
-											  VK_RASSERT_CODE_MAGIC_GUARDS};
-		rassert_code_and_line_.writeN(data_code_and_line, 4);
 		rassert(rassert_descriptor_types.size() == 1, 2026031514151300006);
 		rassert(rassert_descriptor_types[0] == vk::DescriptorType::eStorageBuffer, 2026031514151300007);
-		vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(rassert_code_and_line_.vkBufferData()->getBuffer(), rassert_code_and_line_.vkoffset(), rassert_code_and_line_.size());
+		vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(raster_pipeline->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).vkBufferData()->getBuffer(),
+																		raster_pipeline->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).vkoffset(),
+																		raster_pipeline->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).size());
 		vk::WriteDescriptorSet descriptor_write = vk::WriteDescriptorSet(*rassert_descriptor_set.get(), VK_RASSERT_CODE_BINDING_SLOT, 0, 1, rassert_descriptor_types[0]);
 		descriptor_write.setBufferInfo(buffer_info);
 		context.vk()->getDevice().updateDescriptorSets(descriptor_write, nullptr);
 	}
 
 	std::vector<Arg> args_uniforms = parseArgs(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15, arg16, arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24, arg25, arg26, arg27, arg28, arg29, arg30, arg31, arg32, arg33, arg34, arg35, arg36, arg37, arg38, arg39, arg40);
+	std::vector<VulkanEngine::ResourceAccessRecord> resource_accesses;
+	std::vector<gpu::shared_device_buffer> buffers_keepalive;
+	std::vector<gpu::shared_device_image> images_keepalive;
+	buffers_keepalive.push_back(params.geometry_vertices_.sharedBuffer());
+	buffers_keepalive.push_back(params.geometry_indices_.sharedBuffer());
+	resource_accesses.push_back({params.geometry_vertices_.sharedBuffer().vkBufferData(), ResourceAccessKind::Read});
+	resource_accesses.push_back({params.geometry_indices_.sharedBuffer().vkBufferData(), ResourceAccessKind::Read});
 
 //	std::vector<vk::DescriptorType> descriptor_types = kernel->getDescriptorTypes();
 //	vk::raii::DescriptorSet descriptor_set = context.vk()->allocateDescriptor(kernel->descriptorSetLayout(), descriptor_types);
@@ -2306,6 +2628,7 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 	std::vector<vk::DescriptorImageInfo> images_info(nargs);
 	std::vector<vk::WriteDescriptorSet> descriptor_writes(nargs);
 	rassert(nargs == descriptor_types.size(), 992024390169);
+	rassert(nargs == descriptor_accesses.size(), 2026031517415800014, nargs, descriptor_accesses.size());
 	for (size_t i = 0; i < nargs; ++i) {
 		unsigned int binding = i;
 		rassert(descriptor_set, 787763202);
@@ -2319,6 +2642,8 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 
 			buffers_info[i] = vk::DescriptorBufferInfo(args_uniforms[i].buffer->vkBufferData()->getBuffer(), args_uniforms[i].buffer->vkoffset(), buffer_size);
 			descriptor_writes[i].setBufferInfo(buffers_info[i]);
+			buffers_keepalive.push_back(*args_uniforms[i].buffer);
+			resource_accesses.push_back({args_uniforms[i].buffer->vkBufferData(), toResourceAccessKind(descriptor_accesses[i])});
 		} else if (args_uniforms[i].image) {
 			rassert(vk::DescriptorType::eStorageImage == descriptor_types[i] || vk::DescriptorType::eSampledImage == descriptor_types[i] || vk::DescriptorType::eCombinedImageSampler == descriptor_types[i], 4235123414123);
 			// TODO ADD LAYOUTS SUPPORT: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
@@ -2347,6 +2672,8 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			}
 			images_info[i] = vk::DescriptorImageInfo(args_uniforms[i].image->vkImageData()->getSampler(), image_view, args_uniforms[i].image->vkImageData()->getCurrentLayout());
 			descriptor_writes[i].setImageInfo(images_info[i]);
+			images_keepalive.push_back(*args_uniforms[i].image);
+			resource_accesses.push_back({args_uniforms[i].image->vkImageData(), toResourceAccessKind(descriptor_accesses[i])});
 		} else {
 			rassert(false, 758388889); // this argument is non-empty and is uniform, so it is either buffer or image
 		}
@@ -2366,6 +2693,8 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 				rassert(arg_attachment.getImage().width() >= params.viewport_width_ && arg_attachment.getImage().height() >= params.viewport_height_, 131106553);
 				nlayers = 1;
 			}
+			images_keepalive.push_back(arg_attachment.getImage());
+			resource_accesses.push_back({arg_attachment.getImage().vkImageData(), ResourceAccessKind::ReadWrite});
 		}
 		rassert(nlayers >= 1, 488150461);
 		vk::FramebufferCreateInfo framebuffer_create_info({}, raster_pipeline->renderPass(), attachments_image_views, params.viewport_width_, params.viewport_height_, nlayers);
@@ -2373,11 +2702,18 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 	}
 
 	{
-		vk::raii::CommandBuffer command_buffer = context.vk()->createCommandBuffer();
+		std::shared_ptr<vk::raii::CommandBuffer> command_buffer = std::make_shared<vk::raii::CommandBuffer>(context.vk()->createCommandBuffer());
 
-		command_buffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+		command_buffer->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 		vk::Rect2D render_area(vk::Offset2D(0, 0), vk::Extent2D(params.viewport_width_, params.viewport_height_));
 		std::vector<vk::ClearValue> clear_values;
+		uint32_t query_start = 0;
+		uint32_t query_end = 0;
+		if (context.vk()->async_render_timestamps_enabled_) {
+			query_start = context.vk()->allocateRenderTimestampQueries(2);
+			query_end = query_start + 1;
+			command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **context.vk()->async_render_query_pool_, query_start);
+		}
 
 		// w.r.t. specification https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkRenderPassBeginInfo.html
 		// "Only elements corresponding to cleared attachments are used. Other elements of pClearValues are ignored."
@@ -2404,8 +2740,8 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			}
 		}
 		vk::RenderPassBeginInfo render_pass_begin_info(raster_pipeline->renderPass(), *framebuffer, render_area, clear_values);
-		command_buffer.beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
-		command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipeline());
+		command_buffer->beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
+		command_buffer->bindPipeline(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipeline());
 
 		std::vector<vk::DescriptorSet> descriptor_sets_non_raii;
 		unsigned int first_set = std::numeric_limits<unsigned int>::max();
@@ -2418,59 +2754,103 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			descriptor_sets_non_raii.push_back(*rassert_descriptor_set);
 		}
 		if (descriptor_sets_non_raii.size() > 0) {
-			command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipelineLayout(), first_set, descriptor_sets_non_raii, nullptr);
+			command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipelineLayout(), first_set, descriptor_sets_non_raii, nullptr);
 		}
  
 		// we don't use C++ API here because we want to manually specify size of push constant (via passing push_constant_.size())
 		if (params.push_constant_.size() > 0) {
 			rassert(VKF.vkCmdPushConstants, 3157231286379363);
-			VKF.vkCmdPushConstants(vk::CommandBuffer(command_buffer), VkPipelineLayout(vk::PipelineLayout(raster_pipeline->pipelineLayout())), VK_SHADER_STAGE_ALL_GRAPHICS, 0, params.push_constant_.size(), params.push_constant_.ptr());
+			VKF.vkCmdPushConstants(vk::CommandBuffer(*command_buffer), VkPipelineLayout(vk::PipelineLayout(raster_pipeline->pipelineLayout())), VK_SHADER_STAGE_ALL_GRAPHICS, 0, params.push_constant_.size(), params.push_constant_.ptr());
 		}
 
 		rassert(params.viewport_min_depth_ >= 0.0f && params.viewport_max_depth_ <= 1.0f, 691689354);
 		// note that sadly we can't use viewport depth with [0-MAX_FLT] range due to absence of support for VK_EXT_depth_range_unrestricted on MacOS
 		// see https://github.com/KhronosGroup/MoltenVK/issues/1576 and https://vulkan.gpuinfo.org/listdevicescoverage.php?platform=macos&extension=VK_EXT_depth_range_unrestricted
 		// also it is not supported on Intel Arc, f.e. on Intel A580 - https://vulkan.gpuinfo.org/displayreport.php?id=27375#device
-		command_buffer.setViewport(0, vk::Viewport(0.0f, 0.0f,
-												   params.viewport_width_, params.viewport_height_,
-												   params.viewport_min_depth_, params.viewport_max_depth_));
-		command_buffer.setScissor(0, render_area);
+		command_buffer->setViewport(0, vk::Viewport(0.0f, 0.0f,
+													params.viewport_width_, params.viewport_height_,
+													params.viewport_min_depth_, params.viewport_max_depth_));
+		command_buffer->setScissor(0, render_area);
 
-		command_buffer.bindVertexBuffers(VK_VERTICES_BINDING, params.geometry_vertices_.buffer(), params.geometry_vertices_.offset());
-		command_buffer.bindIndexBuffer(params.geometry_indices_.buffer(), params.geometry_indices_.offset(), vk::IndexType::eUint32); // TODO use offset to render with subdivision (to prevent TDR timeout)
+		command_buffer->bindVertexBuffers(VK_VERTICES_BINDING, params.geometry_vertices_.buffer(), params.geometry_vertices_.offset());
+		command_buffer->bindIndexBuffer(params.geometry_indices_.buffer(), params.geometry_indices_.offset(), vk::IndexType::eUint32); // TODO use offset to render with subdivision (to prevent TDR timeout)
 
 		size_t first_face = 0; // TODO use offset to render with subdivision (to prevent TDR timeout)
 		size_t first_index = 3 * first_face;
-		command_buffer.drawIndexed(params.geometry_indices_.nindices(), 1, first_index, 0, 0);
+		command_buffer->drawIndexed(params.geometry_indices_.nindices(), 1, first_index, 0, 0);
 
-		command_buffer.endRenderPass();
-		command_buffer.end();
+		command_buffer->endRenderPass();
+		if (context.vk()->async_render_timestamps_enabled_) {
+			command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, **context.vk()->async_render_query_pool_, query_end);
+		}
+		command_buffer->end();
 
 		last_exec_prepairing_time_ = total_t.elapsed();
 
 		timer gpu_t;
 		gpu_t.start();
-		vk::raii::Fence &fence = context.vk()->findFence("launchRender");
-		context.vk()->submitCommandBuffer(command_buffer, fence);
+		if (!context.vk()->async_render_enabled_) {
+			vk::raii::Fence &fence = context.vk()->findFence("launchRender");
+			context.vk()->submitCommandBuffer(*command_buffer, fence);
+			if (is_rassert_used) {
+				raster_pipeline->checkRassertCode(static_cast<size_t>(rassert_slot));
+			}
+		} else {
+			context.vk()->retireCompletedInflightRenderLaunches();
+			while (true) {
+				bool has_capacity = false;
+				{
+					Lock lock(context.vk()->inflight_render_launches_mutex_);
+					has_capacity = context.vk()->inflight_render_launches_.size() < context.vk()->max_inflight_render_launches_;
+				}
+				if (has_capacity) {
+					break;
+				}
+
+				VulkanEngine::InflightRenderLaunch oldest;
+				{
+					Lock lock(context.vk()->inflight_render_launches_mutex_);
+					rassert(!context.vk()->inflight_render_launches_.empty(), 2026031517415800015);
+					oldest = context.vk()->inflight_render_launches_.front();
+				}
+				timer wait_timer;
+				try {
+					context.vk()->waitForInflightRenderLaunch(oldest);
+				} catch (...) {
+					context.vk()->eraseInflightRenderLaunch(oldest.submit_id);
+					throw;
+				}
+				context.vk()->async_render_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+				++context.vk()->async_render_stats_.waits_due_to_limit;
+				context.vk()->eraseInflightRenderLaunch(oldest.submit_id);
+			}
+
+			std::shared_ptr<vk::raii::Fence> fence = context.vk()->acquireInflightFence();
+			context.vk()->submitCommandBufferAsync(*command_buffer, *fence);
+
+			VulkanEngine::InflightRenderLaunch launch;
+			launch.pipeline = raster_pipeline;
+			launch.command_buffer = command_buffer;
+			launch.fence = fence;
+			launch.descriptor_set = descriptor_set;
+			launch.rassert_descriptor_set = rassert_descriptor_set;
+			launch.framebuffer_keepalive = framebuffer;
+			launch.buffers_keepalive = std::move(buffers_keepalive);
+			launch.images_keepalive = std::move(images_keepalive);
+			launch.resource_accesses = std::move(resource_accesses);
+			launch.query_start = query_start;
+			launch.query_end = query_end;
+			launch.rassert_slot = rassert_slot;
+			launch.submit_id = context.vk()->next_render_submit_id_++;
+
+			Lock lock(context.vk()->inflight_render_launches_mutex_);
+			context.vk()->inflight_render_launches_.push_back(std::move(launch));
+		}
 		last_exec_gpu_time_ = gpu_t.elapsed();
 	}
 
-	if (is_rassert_used) {
-		// TODO will be in kernel->checkRassertCode();
-		unsigned int data_code_and_line[4] = {0, 239, 17, 0};
-		rassert_code_and_line_.readN(data_code_and_line, 4);
-
-		// if there is out-of-bounds writing in some kernels - they can accidentally write their trash values into code/line memory bytes
-		// so let's check that magic guards were untouched (if there are out-of-bounds writing - it will probably overwrite magic guards too)
-		rassert(data_code_and_line[0] == VK_RASSERT_CODE_MAGIC_GUARDS, 34521253541);
-		rassert(data_code_and_line[3] == VK_RASSERT_CODE_MAGIC_GUARDS, 1535346445);
-
-		unsigned int code = data_code_and_line[1];
-		unsigned int line = data_code_and_line[2];
-		rassert_gpu(code == VK_RASSERT_CODE_EMPTY && line == VK_RASSERT_LINE_EMPTY, "Vulkan kernel detected error on GPU with code=" + to_string(code) + " at kernel line=" + to_string(line));
-	}
-
 	if (context.isMemoryGuardsChecksAfterKernelsEnabled()) {
+		context.vk()->waitForAllInflightRenderLaunches();
 		for (size_t i = 0; i < args_uniforms.size(); ++i) {
 			unsigned int binding = i;
 			if (args_uniforms[i].buffer) {
@@ -2574,7 +2954,40 @@ void avk2::VulkanRasterPipeline::create(vk::raii::DescriptorSetLayout &&descript
 	pipeline_ = std::make_shared<vk::raii::Pipeline>(std::move(pipeline));
 	shader_module_infos_ = std::make_shared<std::vector<avk2::ShaderModuleInfo>>(std::move(shader_module_infos));
 	descriptor_types_ = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(*shader_module_infos_, VK_MAIN_BINDING_SET);
+	descriptor_accesses_ = avk2::ShaderModuleInfo::getMergedDescriptorsAccesses(*shader_module_infos_, VK_MAIN_BINDING_SET);
 	is_rassert_used_ = avk2::ShaderModuleInfo::isDescriptorUsedInAny(*shader_module_infos_, VK_RASSERT_CODE_SET, VK_RASSERT_CODE_BINDING_SLOT);
+
+	if (is_rassert_used_) {
+		gpu::Context context;
+		rassert(context.type() == gpu::Context::TypeVulkan, 2026031517415800009);
+
+		unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
+											  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
+											  VK_RASSERT_CODE_MAGIC_GUARDS};
+		for (size_t slot = 0; slot < rassert_code_and_line_.size(); ++slot) {
+			rassert_code_and_line_[slot].resizeN(4);
+			rassert_code_and_line_[slot].writeN(data_code_and_line, 4);
+		}
+	}
+}
+
+void avk2::VulkanRasterPipeline::resetRassertCode(size_t slot)
+{
+	rassert(isRassertUsed(), 2026031517415800010);
+	rassert(slot < rassert_code_and_line_.size(), 2026031517415800011, slot, rassert_code_and_line_.size());
+	unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
+										  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
+										  VK_RASSERT_CODE_MAGIC_GUARDS};
+	rassert_code_and_line_[slot].writeN(data_code_and_line, 4);
+}
+
+void avk2::VulkanRasterPipeline::checkRassertCode(size_t slot)
+{
+	rassert(isRassertUsed(), 2026031517415800012);
+	rassert(slot < rassert_code_and_line_.size(), 2026031517415800013, slot, rassert_code_and_line_.size());
+	unsigned int data_code_and_line[4] = {0, 239, 17, 0};
+	rassert_code_and_line_[slot].readN(data_code_and_line, 4);
+	checkVulkanRassertWords(data_code_and_line);
 }
 
 void avk2::VulkanKernelArg::init()

@@ -48,6 +48,7 @@ namespace vk {
 		class PipelineLayout; // TODO ???
 		class Pipeline; // Bakes a lot of state, but viewport/stencil masks/blend constants/etc. can be changed dynamically
 		class RenderPass;
+		class Framebuffer;
 		class QueryPool;
 
 //		class DescriptorPool; // Used to allocate descriptors
@@ -118,6 +119,8 @@ namespace avk2 {
 		size_t waits_due_to_limit = 0;
 		double wait_due_to_limit_seconds = 0.0;
 	};
+
+	using AsyncRenderStats = AsyncComputeStats;
 
 	class InstanceContext {
 	public:
@@ -241,6 +244,7 @@ namespace avk2 {
 		vk::VertexInputBindingDescription					buildBindingDescription() const;
 		std::vector<vk::VertexInputAttributeDescription>	buildAttributeDescriptions() const;
 		vk::Buffer											buffer() const;
+		const gpu::shared_device_buffer						&sharedBuffer() const { return buffer_; }
 
 		bool								isNull() const		{ return buffer_.isNull();         }
 		size_t								stride() const		{ return stride_;                  }
@@ -283,6 +287,7 @@ namespace avk2 {
 		size_t								nfaces() const			{ return n_faces_;         }
 		size_t								offset() const			{ return buffer_.vkoffset();}
 		vk::Buffer							buffer() const;
+		const gpu::shared_device_buffer		&sharedBuffer() const { return buffer_; }
 
 	protected:
 		gpu::shared_device_buffer			buffer_;
@@ -367,7 +372,11 @@ namespace avk2 {
 		vk::raii::Pipeline&								pipeline()						{ return *pipeline_.get(); }
 		const std::vector<avk2::ShaderModuleInfo>		&shaderModuleInfos() const		{ return *shader_module_infos_.get(); }
 		const std::vector<vk::DescriptorType>			&getDescriptorTypes() const		{ return descriptor_types_; }
+		const std::vector<DescriptorAccess>				&getDescriptorAccesses() const	{ return descriptor_accesses_; }
 		bool											isRassertUsed() const			{ return is_rassert_used_; }
+		gpu::gpu_mem_32u&								rassertCodeAndLineBuffer(size_t slot) { return rassert_code_and_line_.at(slot); }
+		void											resetRassertCode(size_t slot);
+		void											checkRassertCode(size_t slot);
 
 	protected:
 		std::shared_ptr<vk::raii::DescriptorSetLayout>		descriptor_set_layout_;
@@ -378,6 +387,8 @@ namespace avk2 {
 		std::shared_ptr<std::vector<avk2::ShaderModuleInfo>> shader_module_infos_;
 		bool												is_rassert_used_;
 		std::vector<vk::DescriptorType>						descriptor_types_;
+		std::vector<DescriptorAccess>						descriptor_accesses_;
+		std::array<gpu::gpu_mem_32u, 2>						rassert_code_and_line_;
 	};
 
 	class VulkanEngine {
@@ -422,10 +433,16 @@ namespace avk2 {
 		void							logRasterPipelineCacheContents() const;
 		void							setMaxInflightComputeLaunches(size_t max_inflight);
 		size_t							maxInflightComputeLaunches() const { return max_inflight_compute_launches_; }
+		void							setMaxInflightRenderLaunches(size_t max_inflight);
+		size_t							maxInflightRenderLaunches() const { return max_inflight_render_launches_; }
 		void							resetAsyncComputeStats();
 		AsyncComputeStats				getAsyncComputeStats(bool wait_for_all=true);
 		void							logAsyncComputeStats(const std::string &label="", bool wait_for_all=true);
+		void							resetAsyncRenderStats();
+		AsyncRenderStats				getAsyncRenderStats(bool wait_for_all=true);
+		void							logAsyncRenderStats(const std::string &label="", bool wait_for_all=true);
 		void							waitForAllInflightComputeLaunches();
+		void							waitForAllInflightRenderLaunches();
 		void							waitForBuffer(const avk2::raii::BufferData &buffer);
 		void							waitForImage(const avk2::raii::ImageData &image);
 
@@ -459,6 +476,8 @@ namespace avk2 {
 			uint64_t end_ticks = 0;
 		};
 
+		using CompletedRenderInterval = CompletedComputeInterval;
+
 		struct InflightComputeLaunch {
 			std::shared_ptr<VulkanKernel> kernel;
 			std::shared_ptr<vk::raii::CommandBuffer> command_buffer;
@@ -466,6 +485,22 @@ namespace avk2 {
 			std::shared_ptr<vk::raii::DescriptorSet> descriptor_set;
 			std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
 			std::shared_ptr<vk::raii::DescriptorSetLayout> rassert_descriptor_set_layout;
+			std::vector<gpu::shared_device_buffer> buffers_keepalive;
+			std::vector<gpu::shared_device_image> images_keepalive;
+			std::vector<ResourceAccessRecord> resource_accesses;
+			uint32_t query_start = 0;
+			uint32_t query_end = 0;
+			int rassert_slot = -1;
+			uint64_t submit_id = 0;
+		};
+
+		struct InflightRenderLaunch {
+			std::shared_ptr<VulkanRasterPipeline> pipeline;
+			std::shared_ptr<vk::raii::CommandBuffer> command_buffer;
+			std::shared_ptr<vk::raii::Fence> fence;
+			std::shared_ptr<vk::raii::DescriptorSet> descriptor_set;
+			std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
+			std::shared_ptr<void> framebuffer_keepalive;
 			std::vector<gpu::shared_device_buffer> buffers_keepalive;
 			std::vector<gpu::shared_device_image> images_keepalive;
 			std::vector<ResourceAccessRecord> resource_accesses;
@@ -483,19 +518,27 @@ namespace avk2 {
 		void							waitForInflightComputeLaunch(InflightComputeLaunch &launch);
 		void							finishInflightComputeLaunchAfterFence(InflightComputeLaunch &launch);
 		void							eraseInflightComputeLaunch(uint64_t submit_id);
+		void							retireCompletedInflightRenderLaunches();
+		void							waitForInflightRenderLaunch(InflightRenderLaunch &launch);
+		void							finishInflightRenderLaunchAfterFence(InflightRenderLaunch &launch);
+		void							eraseInflightRenderLaunch(uint64_t submit_id);
 		bool							doResourceAccessesConflict(const std::vector<ResourceAccessRecord> &lhs, const std::vector<ResourceAccessRecord> &rhs) const;
 		void							waitForConflictingInflightLaunches(const std::vector<ResourceAccessRecord> &resource_accesses);
+		void							waitForConflictingInflightRenderLaunches(const std::vector<ResourceAccessRecord> &resource_accesses);
 		uint32_t						allocateTimestampQueries(uint32_t count);
+		uint32_t						allocateRenderTimestampQueries(uint32_t count);
 		void							appendCompletedComputeInterval(const InflightComputeLaunch &launch);
+		void							appendCompletedRenderInterval(const InflightRenderLaunch &launch);
 		int								acquireRassertSlot(const std::shared_ptr<VulkanKernel> &kernel);
+		int								acquireRasterRassertSlot(const std::shared_ptr<VulkanRasterPipeline> &pipeline);
 
 		void							allocateStagingWriteBuffers();
 		void							allocateStagingReadBuffers();
 
 		vk::raii::DescriptorPool &		getDescriptorPool();
 		vk::raii::CommandPool &			getCommandPool();
-		std::shared_ptr<vk::raii::Fence>		acquireInflightComputeFence();
-		void							recycleInflightComputeFence(std::shared_ptr<vk::raii::Fence> fence);
+		std::shared_ptr<vk::raii::Fence>		acquireInflightFence();
+		void							recycleInflightFence(std::shared_ptr<vk::raii::Fence> fence);
 
 		// TODO we can try to speedup it a bit more via triple-buffering
 		std::unique_ptr<avk2::raii::BufferData>		staging_read_buffers_[2];
@@ -505,6 +548,7 @@ namespace avk2 {
 		Mutex										staging_read_buffers_mutex_;
 		Mutex										staging_write_buffers_mutex_;
 		Mutex										inflight_compute_launches_mutex_;
+		Mutex										inflight_render_launches_mutex_;
 
 		using ComputeFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanKernel>>;
 		using RasterFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanRasterPipeline>>;
@@ -516,15 +560,24 @@ namespace avk2 {
 
 		uint64_t						vk_device_id_;
 		size_t							max_inflight_compute_launches_;
+		size_t							max_inflight_render_launches_;
 		std::deque<InflightComputeLaunch> inflight_compute_launches_;
-		std::deque<std::shared_ptr<vk::raii::Fence>> available_compute_fences_;
+		std::deque<InflightRenderLaunch> inflight_render_launches_;
+		std::deque<std::shared_ptr<vk::raii::Fence>> available_async_fences_;
 		std::shared_ptr<vk::raii::QueryPool> async_compute_query_pool_;
+		std::shared_ptr<vk::raii::QueryPool> async_render_query_pool_;
 		bool							async_compute_timestamps_enabled_;
+		bool							async_render_timestamps_enabled_;
+		bool							async_render_enabled_;
 		uint32_t						next_async_compute_query_;
+		uint32_t						next_async_render_query_;
 		uint64_t						next_compute_submit_id_;
+		uint64_t						next_render_submit_id_;
 		float							timestamp_period_nanos_;
 		AsyncComputeStats				async_compute_stats_;
+		AsyncRenderStats				async_render_stats_;
 		std::vector<CompletedComputeInterval> completed_compute_intervals_;
+		std::vector<CompletedRenderInterval> completed_render_intervals_;
 
 		Device							device_;
 	};
