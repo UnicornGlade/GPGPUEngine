@@ -6,7 +6,9 @@
 
 #include <libbase/point.h>
 #include <libbase/platform.h>
+#include <libbase/lru_cache.h>
 #include <libbase/string_utils.h>
+#include <functional>
 #include <map>
 #include <vector>
 #include <memory>
@@ -42,6 +44,7 @@ namespace vk {
 		class DescriptorSetLayout; // TODO ???
 		class PipelineLayout; // TODO ???
 		class Pipeline; // Bakes a lot of state, but viewport/stencil masks/blend constants/etc. can be changed dynamically
+		class RenderPass;
 
 //		class DescriptorPool; // Used to allocate descriptors
 
@@ -308,7 +311,42 @@ namespace avk2 {
 		std::vector<vk::DescriptorType>				descriptor_types_;
 	};
 
+	struct PipelineCacheStats {
+		size_t hits = 0;
+		size_t misses = 0;
+	};
+
+	class VulkanRasterPipeline {
+	public:
+		void create(vk::raii::DescriptorSetLayout &&descriptor_set_layout,
+					vk::raii::DescriptorSetLayout &&descriptor_set_layout_for_rassert,
+					vk::raii::PipelineLayout &&pipeline_layout,
+					vk::raii::RenderPass &&render_pass,
+					vk::raii::Pipeline &&pipeline,
+					std::vector<avk2::ShaderModuleInfo> &&shader_module_infos);
+
+		vk::raii::DescriptorSetLayout&					descriptorSetLayout()			{ return *descriptor_set_layout_.get(); }
+		vk::raii::DescriptorSetLayout&					descriptorSetLayoutRassert()	{ return *descriptor_set_layout_rassert_.get(); }
+		vk::raii::PipelineLayout&						pipelineLayout()				{ return *pipeline_layout_.get(); }
+		vk::raii::RenderPass&							renderPass()					{ return *render_pass_.get(); }
+		vk::raii::Pipeline&								pipeline()						{ return *pipeline_.get(); }
+		const std::vector<avk2::ShaderModuleInfo>		&shaderModuleInfos() const		{ return *shader_module_infos_.get(); }
+		const std::vector<vk::DescriptorType>			&getDescriptorTypes() const		{ return descriptor_types_; }
+		bool											isRassertUsed() const			{ return is_rassert_used_; }
+
+	protected:
+		std::shared_ptr<vk::raii::DescriptorSetLayout>		descriptor_set_layout_;
+		std::shared_ptr<vk::raii::DescriptorSetLayout>		descriptor_set_layout_rassert_;
+		std::shared_ptr<vk::raii::PipelineLayout>			pipeline_layout_;
+		std::shared_ptr<vk::raii::RenderPass>				render_pass_;
+		std::shared_ptr<vk::raii::Pipeline>					pipeline_;
+		std::shared_ptr<std::vector<avk2::ShaderModuleInfo>> shader_module_infos_;
+		bool												is_rassert_used_;
+		std::vector<vk::DescriptorType>						descriptor_types_;
+	};
+
 	class VulkanEngine {
+		friend class KernelSource;
 	public:
 		VulkanEngine();
 		~VulkanEngine();
@@ -330,13 +368,23 @@ namespace avk2 {
 		void							readImage(const avk2::raii::ImageData &image_src, const AnyImage &dst);
 
 		const Device &					device() const			{	return device_;		}
-		std::map<int, VulkanKernel *> &	kernels()	{	return kernels_;	}
-
-		VulkanKernel *					findKernel(int id) const;
-		void							clearKernel(int id);
+		void							setPipelineCacheCapacityPerFamily(size_t capacity);
+		size_t							pipelineCacheCapacityPerFamily() const	{ return pipeline_cache_capacity_per_family_; }
+		PipelineCacheStats				getComputePipelineCacheStats() const	{ return compute_pipeline_cache_stats_; }
+		PipelineCacheStats				getRasterPipelineCacheStats() const		{ return raster_pipeline_cache_stats_; }
+		void							resetComputePipelineCacheStats();
+		void							resetRasterPipelineCacheStats();
+		void							clearComputePipelineCache();
+		void							clearRasterPipelineCache();
 		void							clearKernels();
+		void							clearPipelineCaches();
 		void							clearStagingBuffers();
 		void							clearFences();
+		size_t							computePipelineCacheSize() const;
+		size_t							rasterPipelineCacheSize() const;
+		size_t							cachedPipelinesCount() const;
+		void							logComputePipelineCacheContents() const;
+		void							logRasterPipelineCacheContents() const;
 
 		std::unordered_map<std::string, std::shared_ptr<vk::raii::Fence>>	fences_;
 
@@ -360,6 +408,8 @@ namespace avk2 {
 	protected:
 		avk2::raii::ImageData*			createImage2D(unsigned int width, unsigned int height, vk::Format format);
 		avk2::raii::ImageData*			createImage2DArray(unsigned int width, unsigned int height, size_t cn, vk::Format format);
+		std::shared_ptr<VulkanKernel>	getOrCreateComputeKernel(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanKernel>()> &create_fn);
+		std::shared_ptr<VulkanRasterPipeline> getOrCreateRasterPipeline(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanRasterPipeline>()> &create_fn);
 
 		void							allocateStagingWriteBuffers();
 		void							allocateStagingReadBuffers();
@@ -375,7 +425,13 @@ namespace avk2 {
 		Mutex										staging_read_buffers_mutex_;
 		Mutex										staging_write_buffers_mutex_;
 
-		std::map<int, VulkanKernel *>	kernels_;
+		using ComputeFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanKernel>>;
+		using RasterFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanRasterPipeline>>;
+		size_t										pipeline_cache_capacity_per_family_;
+		PipelineCacheStats							compute_pipeline_cache_stats_;
+		PipelineCacheStats							raster_pipeline_cache_stats_;
+		std::unordered_map<std::string, ComputeFamilyCache> compute_pipeline_caches_;
+		std::unordered_map<std::string, RasterFamilyCache> raster_pipeline_caches_;
 
 		uint64_t						vk_device_id_;
 
@@ -525,8 +581,6 @@ namespace avk2 {
 
         void dispatchAutoSubdivided(const vk::raii::CommandBuffer &command_buffer, const gpu::WorkSize &ws) const;
 
-		int getNextKernelId();
-
 		void										init();
 
 		static bool									parseArg(std::vector<avk2::KernelSource::Arg> &args, const Arg &arg);
@@ -534,9 +588,14 @@ namespace avk2 {
 
 		static vk::raii::ShaderModule				createShaderModule(const std::shared_ptr<VulkanEngine> &vk, const ProgramBinaries &program, avk2::ShaderModuleInfo *shader_module_info_output=nullptr);
 
-		VulkanKernel								*getKernel(const std::shared_ptr<VulkanEngine> &vk);
-		VulkanKernel								*compileComputeKernel(const std::shared_ptr<VulkanEngine> &vk);
-		VulkanKernel								*compileRasterizationKernel(const std::shared_ptr<VulkanEngine> &vk);
+		std::shared_ptr<VulkanKernel>				getKernel(const std::shared_ptr<VulkanEngine> &vk);
+		std::shared_ptr<VulkanKernel>				compileComputeKernel(const std::shared_ptr<VulkanEngine> &vk);
+		std::shared_ptr<VulkanRasterPipeline>		getRasterPipeline(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params);
+		std::shared_ptr<VulkanRasterPipeline>		compileRasterPipeline(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params);
+		std::string									getComputeCacheFamilyKey() const;
+		std::string									getComputeCacheVariantKey(const std::shared_ptr<VulkanEngine> &vk) const;
+		std::string									getRasterCacheFamilyKey() const;
+		std::string									getRasterCacheVariantKey(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params) const;
 
 		std::vector<const ProgramBinaries*>			shaders_programs_;
 
@@ -544,7 +603,6 @@ namespace avk2 {
 		double										last_exec_prepairing_time_;
 		double										last_exec_gpu_time_;
 
-		int				id_;
 		std::string		name_;
 	};
 

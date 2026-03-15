@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <sstream>
 
 #include "vk/common_host.h"
 
@@ -81,6 +82,26 @@ namespace {
 	{
 		rassert(VKF.vkDestroyDebugUtilsMessengerEXT, 378392459011672);
 		VKF.vkDestroyDebugUtilsMessengerEXT(*instance, debug_messenger, nullptr);
+	}
+
+	template <typename FamilyCacheMap>
+	size_t countCachedPipelines(const FamilyCacheMap &caches)
+	{
+		size_t total = 0;
+		for (const auto &family_it: caches) {
+			total += family_it.second.size();
+		}
+		return total;
+	}
+
+	template <typename FamilyCacheMap>
+	void logCachedPipelines(const FamilyCacheMap &caches, const std::string &cache_name)
+	{
+		size_t total = countCachedPipelines(caches);
+		std::cout << cache_name << " entries total=" << total << std::endl;
+		for (const auto &family_it: caches) {
+			std::cout << " - " << family_it.first << ": " << family_it.second.size() << std::endl;
+		}
 	}
 }
 
@@ -573,14 +594,110 @@ vk::raii::DescriptorPool &avk2::VulkanEngine::getDescriptorPool()
 }
 
 avk2::VulkanEngine::VulkanEngine()
-	: vk_device_id_(std::numeric_limits<uint64_t>::max()), device_(vk_device_id_)
+	: pipeline_cache_capacity_per_family_(4),
+	  vk_device_id_(std::numeric_limits<uint64_t>::max()),
+	  device_(vk_device_id_)
 {}
 
 avk2::VulkanEngine::~VulkanEngine()
 {
-	if (kernels_.size() != 0) {
-		std::cerr << "VulkanEngine: uncleared kernel found" << std::endl;
+	if (cachedPipelinesCount() != 0) {
+		std::cerr << "VulkanEngine: uncleared cached pipelines found" << std::endl;
 	}
+}
+
+void avk2::VulkanEngine::setPipelineCacheCapacityPerFamily(size_t capacity)
+{
+	rassert(capacity > 0, 2026031513114100001);
+	if (pipeline_cache_capacity_per_family_ == capacity) {
+		return;
+	}
+
+	pipeline_cache_capacity_per_family_ = capacity;
+	clearPipelineCaches();
+}
+
+void avk2::VulkanEngine::resetComputePipelineCacheStats()
+{
+	compute_pipeline_cache_stats_ = {};
+}
+
+void avk2::VulkanEngine::resetRasterPipelineCacheStats()
+{
+	raster_pipeline_cache_stats_ = {};
+}
+
+void avk2::VulkanEngine::clearComputePipelineCache()
+{
+	compute_pipeline_caches_.clear();
+}
+
+void avk2::VulkanEngine::clearRasterPipelineCache()
+{
+	raster_pipeline_caches_.clear();
+}
+
+void avk2::VulkanEngine::clearPipelineCaches()
+{
+	clearComputePipelineCache();
+	clearRasterPipelineCache();
+}
+
+size_t avk2::VulkanEngine::computePipelineCacheSize() const
+{
+	return countCachedPipelines(compute_pipeline_caches_);
+}
+
+size_t avk2::VulkanEngine::rasterPipelineCacheSize() const
+{
+	return countCachedPipelines(raster_pipeline_caches_);
+}
+
+size_t avk2::VulkanEngine::cachedPipelinesCount() const
+{
+	return computePipelineCacheSize() + rasterPipelineCacheSize();
+}
+
+void avk2::VulkanEngine::logComputePipelineCacheContents() const
+{
+	logCachedPipelines(compute_pipeline_caches_, "compute pipeline cache");
+}
+
+void avk2::VulkanEngine::logRasterPipelineCacheContents() const
+{
+	logCachedPipelines(raster_pipeline_caches_, "raster pipeline cache");
+}
+
+std::shared_ptr<avk2::VulkanKernel> avk2::VulkanEngine::getOrCreateComputeKernel(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanKernel>()> &create_fn)
+{
+	auto family_it = compute_pipeline_caches_.find(family_key);
+	if (family_it == compute_pipeline_caches_.end()) {
+		family_it = compute_pipeline_caches_.emplace(family_key, ComputeFamilyCache(pipeline_cache_capacity_per_family_)).first;
+	}
+
+	if (std::shared_ptr<VulkanKernel> *cached = family_it->second.get(variant_key)) {
+		++compute_pipeline_cache_stats_.hits;
+		return *cached;
+	}
+
+	++compute_pipeline_cache_stats_.misses;
+	return family_it->second.put(variant_key, create_fn());
+}
+
+std::shared_ptr<avk2::VulkanRasterPipeline> avk2::VulkanEngine::getOrCreateRasterPipeline(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanRasterPipeline>()> &create_fn)
+{
+	auto family_it = raster_pipeline_caches_.find(family_key);
+	if (family_it == raster_pipeline_caches_.end()) {
+		family_it = raster_pipeline_caches_.emplace(family_key, RasterFamilyCache(pipeline_cache_capacity_per_family_)).first;
+	}
+
+	if (std::shared_ptr<VulkanRasterPipeline> *cached = family_it->second.get(variant_key)) {
+		++raster_pipeline_cache_stats_.hits;
+		return *cached;
+	}
+
+	++raster_pipeline_cache_stats_.misses;
+	return family_it->second.put(variant_key, create_fn());
 }
 
 void avk2::VulkanEngine::init(uint64_t vk_device_id, bool enable_validation_layers)
@@ -1034,28 +1151,9 @@ void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, si
 	}
 }
 
-avk2::VulkanKernel *avk2::VulkanEngine::findKernel(int id) const
-{
-	std::map<int, VulkanKernel *>::const_iterator it = kernels_.find(id);
-	if (it != kernels_.end())
-		return it->second;
-	return nullptr;
-}
-
-void avk2::VulkanEngine::clearKernel(int id)
-{
-	auto it = kernels_.find(id);
-	if (it != kernels_.end()) {
-		delete it->second;
-		kernels_.erase(it);
-	}
-}
-
 void avk2::VulkanEngine::clearKernels()
 {
-	for (auto it = kernels_.begin(); it != kernels_.end(); ++it)
-		delete it->second;
-	kernels_.clear();
+	clearPipelineCaches();
 }
 
 void avk2::VulkanEngine::clearStagingBuffers()
@@ -1119,29 +1217,13 @@ avk2::KernelSource::KernelSource(const std::vector<const ProgramBinaries*> &grap
 
 avk2::KernelSource::~KernelSource()
 {
-	gpu::Context context;
-	if (context.type() == gpu::Context::TypeVulkan) {
-		sh_ptr_vk_engine vk = context.vk();
-		context.vk()->clearKernel(id_);
-		// without this - if KernelSource is declared in local scope - then its VulkanKernel counterpart
-		// will live until Vulkan context is not destroyed
-		// and if the local scope is visited again - new KernelSource construction will lead to new VulkanKernel in addition to the old one
-	}
 }
 
 void avk2::KernelSource::init()
 {
-	id_		= getNextKernelId();
-
 	// note that glslc doesn't support multiple entry points - https://github.com/KhronosGroup/glslang/issues/605
 	// note that glslc support different from "main" entry point name - https://github.com/KhronosGroup/glslang/issues/1045 
 	name_	= "main";
-}
-
-int avk2::KernelSource::getNextKernelId()
-{
-	static int next_kernel_id = 0;
-	return next_kernel_id++;
 }
 
 namespace avk2 {
@@ -1175,7 +1257,58 @@ vk::raii::ShaderModule avk2::KernelSource::createShaderModule(const std::shared_
 	return std::move(shader_module);
 }
 
-avk2::VulkanKernel *avk2::KernelSource::compileComputeKernel(const std::shared_ptr<VulkanEngine> &vk) {
+std::string avk2::KernelSource::getComputeCacheFamilyKey() const
+{
+	rassert(isCompute(), 2026031514151300001);
+	return shaders_programs_[0]->programName();
+}
+
+std::string avk2::KernelSource::getComputeCacheVariantKey(const std::shared_ptr<VulkanEngine> &vk) const
+{
+	(void) vk;
+	return "entry=" + name_ + "|dispatch_base=1";
+}
+
+std::string avk2::KernelSource::getRasterCacheFamilyKey() const
+{
+	rassert(isRasterization(), 2026031514151300002);
+	std::ostringstream out;
+	for (size_t i = 0; i < shaders_programs_.size(); ++i) {
+		if (i > 0) {
+			out << ";";
+		}
+		out << shaders_programs_[i]->programName();
+	}
+	return out.str();
+}
+
+std::string avk2::KernelSource::getRasterCacheVariantKey(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params) const
+{
+	(void) vk;
+	std::ostringstream out;
+	out << "entry=" << name_
+		<< "|adj=" << params.faces_with_adjacency_
+		<< "|wire=" << params.polygon_mode_wireframe_
+		<< "|depth_write=" << params.depth_write_enable_
+		<< "|blend=" << params.color_attachments_blending_enabled_;
+
+	vk::VertexInputBindingDescription binding = params.geometry_vertices_.buildBindingDescription();
+	out << "|vb=" << binding.binding << "," << binding.stride << "," << static_cast<uint32_t>(binding.inputRate);
+	for (const vk::VertexInputAttributeDescription &attr: params.geometry_vertices_.buildAttributeDescriptions()) {
+		out << "|attr=" << attr.location << "," << attr.binding << "," << static_cast<uint32_t>(attr.format) << "," << attr.offset;
+	}
+
+	out << "|attachments=" << params.depth_and_color_attachments_.size();
+	for (const avk2::ImageAttachment &attachment: params.depth_and_color_attachments_) {
+		out << "|" << (attachment.isColorAttachment() ? "c" : "d")
+			<< ":" << static_cast<uint32_t>(attachment.getImage().vkImageData()->getFormat())
+			<< ":" << attachment.getImage().cn()
+			<< ":" << attachment.hasClearValue();
+	}
+	return out.str();
+}
+
+std::shared_ptr<avk2::VulkanKernel> avk2::KernelSource::compileComputeKernel(const std::shared_ptr<VulkanEngine> &vk) {
 	const ProgramBinaries* compute_program = shaders_programs_[0];
 	rassert(compute_program->isProgramNameEndsWith("_comp"), 350141882);
 
@@ -1225,41 +1358,208 @@ avk2::VulkanKernel *avk2::KernelSource::compileComputeKernel(const std::shared_p
     // If any of baseGroupX (123456), baseGroupY (0), or baseGroupZ (0) are not zero, then the bound compute pipeline must have been created with the VK_PIPELINE_CREATE_DISPATCH_BASE flag
     compute_pipeline_create_info.setFlags(vk::PipelineCreateFlagBits::eDispatchBase);
 
-	VulkanKernel *kernel = new VulkanKernel(compute_program->programName());
+	std::shared_ptr<VulkanKernel> kernel = std::make_shared<VulkanKernel>(compute_program->programName());
 //		vk::raii::PipelineCache pipeline_cache = vk->getDevice().createPipelineCache(vk::PipelineCacheCreateInfo()); // TODO use pipeline caching
 	vk::raii::Pipeline pipeline = vk->getDevice().createComputePipeline(nullptr, compute_pipeline_create_info);
 	kernel->create(std::move(descriptor_set_layout_raii), std::move(descriptor_set_layout_rassert_raii), std::move(pipeline_layout), std::move(pipeline), std::move(shader_module_info));
 	return kernel;
 }
 
-avk2::VulkanKernel *avk2::KernelSource::compileRasterizationKernel(const std::shared_ptr<VulkanEngine> &vk)
+std::shared_ptr<avk2::VulkanKernel> avk2::KernelSource::getKernel(const std::shared_ptr<VulkanEngine> &vk)
 {
-	rassert(false, 618525500); // TODO
+	rassert(isCompute(), 2026031514151300003);
+	std::string family_key = getComputeCacheFamilyKey();
+	std::string variant_key = getComputeCacheVariantKey(vk);
+	return vk->getOrCreateComputeKernel(family_key, variant_key, [&]() {
+		timer tm;
+		tm.start();
+		std::shared_ptr<VulkanKernel> kernel = compileComputeKernel(vk);
+		double compilation_time = tm.elapsed();
+		if (compilation_time > 0.1) {
+			std::cout << "Vulkan kernels compilation done in " << compilation_time << " seconds for " << vk->device().name << std::endl;
+		}
+		return kernel;
+	});
 }
 
-avk2::VulkanKernel *avk2::KernelSource::getKernel(const std::shared_ptr<VulkanEngine> &vk)
+std::shared_ptr<avk2::VulkanRasterPipeline> avk2::KernelSource::compileRasterPipeline(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params)
 {
-	VulkanKernel *kernel = vk->findKernel(id_);
-	if (kernel)
-		return kernel;
+	rassert(isRasterization(), 2026031514151300004);
 
-	timer tm;
-	tm.start();
+	std::vector<vk::PipelineShaderStageCreateInfo> pipeline_stages;
+	std::vector<vk::DescriptorType> descriptor_types;
+	vk::raii::DescriptorSetLayout descriptor_set_layout_raii = vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, 0));
+	vk::raii::DescriptorSetLayout descriptor_set_layout_rassert_raii = vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, 0));
+	vk::raii::PipelineLayout pipeline_layout = vk->getDevice().createPipelineLayout(vk::PipelineLayoutCreateInfo());
+	std::vector<std::shared_ptr<vk::raii::ShaderModule>> shader_modules;
+	std::vector<avk2::ShaderModuleInfo> pipeline_stages_shader_module_info;
 
-	if (isCompute()) {
-		kernel = compileComputeKernel(vk);
+	rassert(shaders_programs_.size() == 2 || shaders_programs_.size() == 4, 310992267);
+	if (shaders_programs_.size() == 2) {
+		rassert(shaders_programs_[0]->isProgramNameEndsWith("_vert"), 997669760);
+		rassert(shaders_programs_[1]->isProgramNameEndsWith("_frag"), 351354122);
 	} else {
-		rassert(isRasterization(), 751588296);
-		kernel = compileRasterizationKernel(vk);
+		rassert(shaders_programs_[0]->isProgramNameEndsWith("_vert"), 997669566);
+		rassert(shaders_programs_[1]->isProgramNameEndsWith("_tesc"), 997664766);
+		rassert(shaders_programs_[2]->isProgramNameEndsWith("_tese"), 997663766);
+		rassert(shaders_programs_[3]->isProgramNameEndsWith("_frag"), 351354128);
 	}
 
-	double compilation_time = tm.elapsed();
-	if (compilation_time > 0.1) {
-		std::cout << "Vulkan kernels compilation done in " << compilation_time << " seconds for " << vk->device().name << std::endl;
+	for (auto program: shaders_programs_) {
+		vk::ShaderStageFlagBits shader_stage;
+			 if (program->isProgramNameEndsWith("_vert")) shader_stage = vk::ShaderStageFlagBits::eVertex;
+		else if (program->isProgramNameEndsWith("_frag")) shader_stage = vk::ShaderStageFlagBits::eFragment;
+		else if (program->isProgramNameEndsWith("_tesc")) shader_stage = vk::ShaderStageFlagBits::eTessellationControl;
+		else if (program->isProgramNameEndsWith("_tese")) shader_stage = vk::ShaderStageFlagBits::eTessellationEvaluation;
+		else rassert(false, program->programName(), 596279565);
+
+		avk2::ShaderModuleInfo shader_module_info;
+		std::shared_ptr<vk::raii::ShaderModule> shader_module = std::make_shared<vk::raii::ShaderModule>(std::move(createShaderModule(vk, *program, &shader_module_info)));
+		shader_modules.push_back(shader_module);
+
+		vk::PipelineShaderStageCreateInfo pipeline_stages_create_info({}, shader_stage, *shader_module, name_.c_str());
+		pipeline_stages.push_back(pipeline_stages_create_info);
+		pipeline_stages_shader_module_info.push_back(shader_module_info);
 	}
 
-	vk->kernels()[id_] = kernel;
-	return kernel;
+	{
+		std::vector<vk::DescriptorSetLayout> descriptor_set_layouts_non_raii;
+		std::set<unsigned int> descriptors_sets = avk2::ShaderModuleInfo::getMergedDescriptorsSets(pipeline_stages_shader_module_info);
+		if (descriptors_sets.count(VK_MAIN_BINDING_SET) > 0) {
+			descriptor_types = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(pipeline_stages_shader_module_info, VK_MAIN_BINDING_SET);
+			std::vector<vk::DescriptorSetLayoutBinding> descriptor_set_layout_bindings = createDescriptorSetLayoutBindings(descriptor_types, vk::ShaderStageFlagBits::eAllGraphics);
+			descriptor_set_layout_raii = vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, descriptor_set_layout_bindings));
+			descriptor_set_layouts_non_raii.push_back(descriptor_set_layout_raii);
+		} else if (descriptors_sets.count(VK_RASSERT_CODE_SET) > 0) {
+			descriptor_set_layouts_non_raii.push_back(descriptor_set_layout_raii);
+		}
+
+		if (descriptors_sets.count(VK_RASSERT_CODE_SET) > 0) {
+			vk::DescriptorSetLayoutBinding descriptor_set_layout_rassert_binding(VK_RASSERT_CODE_BINDING_SLOT, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eAllGraphics);
+			descriptor_set_layout_rassert_raii = vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, descriptor_set_layout_rassert_binding));
+			descriptor_set_layouts_non_raii.push_back(descriptor_set_layout_rassert_raii);
+		}
+
+		vk::PipelineLayoutCreateInfo pipeline_create_info(vk::PipelineLayoutCreateFlags(), descriptor_set_layouts_non_raii);
+		size_t push_constant_size = avk2::ShaderModuleInfo::getMergedPushConstantSize(pipeline_stages_shader_module_info);
+		std::vector<vk::PushConstantRange> push_constant_ranges = { vk::PushConstantRange(vk::ShaderStageFlagBits::eAllGraphics, 0, push_constant_size) };
+		if (push_constant_size > 0) {
+			pipeline_create_info.setPushConstantRanges(push_constant_ranges);
+		}
+
+		pipeline_layout = vk->getDevice().createPipelineLayout(pipeline_create_info);
+	}
+
+	std::vector<vk::AttachmentDescription> attachments_description;
+	std::vector<vk::AttachmentReference> color_attachment_references;
+	std::shared_ptr<vk::AttachmentReference> depth_stencil_attachment;
+	size_t attachment_slot = 0;
+	for (const avk2::ImageAttachment &arg_attachment: params.depth_and_color_attachments_) {
+		const gpu::shared_device_image &image = arg_attachment.getImage();
+		for (size_t c = 0; c < image.cn(); ++c) {
+			vk::Format format = arg_attachment.getImage().vkImageData()->getFormat();
+			vk::AttachmentLoadOp load_op = arg_attachment.hasClearValue() ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
+			vk::ImageLayout initial_layout = vk::ImageLayout::eGeneral;
+			vk::ImageLayout final_layout = vk::ImageLayout::eGeneral;
+			attachments_description.push_back(vk::AttachmentDescription({}, format, vk::SampleCountFlagBits::e1,
+																		load_op, vk::AttachmentStoreOp::eStore, load_op, vk::AttachmentStoreOp::eStore,
+																		initial_layout, final_layout));
+			if (arg_attachment.isColorAttachment()) {
+				color_attachment_references.push_back(vk::AttachmentReference(attachment_slot, final_layout));
+			} else {
+				rassert(arg_attachment.isDepthStencilAttachment(), 167326983);
+				rassert(!depth_stencil_attachment, 236398326);
+				depth_stencil_attachment = std::make_shared<vk::AttachmentReference>(attachment_slot, final_layout);
+			}
+			++attachment_slot;
+		}
+		rassert(attachment_slot <= VK_MAX_FRAGMENT_OUTPUT_ATTACHMENTS_USED, attachment_slot, 736698915);
+	}
+
+	vk::SubpassDescription subpass({}, vk::PipelineBindPoint::eGraphics, {}, color_attachment_references, {}, depth_stencil_attachment.get(), {});
+	vk::RenderPassCreateInfo render_pass_create_info({}, attachments_description, subpass, {});
+	vk::raii::RenderPass render_pass(vk->getDevice(), render_pass_create_info);
+
+	std::vector<vk::DynamicState> dynamic_states = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+	std::vector<vk::VertexInputBindingDescription> vertex_binding_descriptions = { params.geometry_vertices_.buildBindingDescription() };
+	std::vector<vk::VertexInputAttributeDescription> vertex_attribute_descriptions = params.geometry_vertices_.buildAttributeDescriptions();
+	vk::PipelineVertexInputStateCreateInfo pipeline_vertex_input({}, vertex_binding_descriptions, vertex_attribute_descriptions);
+	vk::PrimitiveTopology primitive_topology = params.faces_with_adjacency_ ? vk::PrimitiveTopology::eTriangleListWithAdjacency : vk::PrimitiveTopology::eTriangleList;
+	vk::PipelineInputAssemblyStateCreateInfo pipeline_input_assembly({}, primitive_topology);
+	vk::PipelineViewportStateCreateInfo pipeline_viewport({}, 1, nullptr, 1, nullptr);
+	vk::PipelineRasterizationStateCreateInfo pipeline_rasterization({}, vk::False, vk::False, params.polygon_mode_wireframe_ ? vk::PolygonMode::eLine : vk::PolygonMode::eFill, vk::CullModeFlagBits::eNone);
+	pipeline_rasterization.lineWidth = 1.0f;
+	vk::PipelineMultisampleStateCreateInfo pipeline_multisample({}, vk::SampleCountFlagBits::e1);
+	vk::PipelineDepthStencilStateCreateInfo pipeline_depth_stencil({}, vk::True, params.depth_write_enable_, vk::CompareOp::eLessOrEqual, vk::False, vk::False);
+
+	std::vector<vk::PipelineColorBlendAttachmentState> color_blend_attachments;
+	for (const avk2::ImageAttachment &arg_attachment: params.depth_and_color_attachments_) {
+		const gpu::shared_device_image &image = arg_attachment.getImage();
+		for (size_t c = 0; c < image.cn(); ++c) {
+			if (!arg_attachment.isColorAttachment()) {
+				continue;
+			}
+			vk::PipelineColorBlendAttachmentState color_blend_attachment_state(vk::False);
+			if (params.color_attachments_blending_enabled_) {
+				color_blend_attachment_state.setBlendEnable(vk::True);
+				color_blend_attachment_state.setSrcColorBlendFactor(vk::BlendFactor::eOne);
+				color_blend_attachment_state.setDstColorBlendFactor(vk::BlendFactor::eOne);
+				color_blend_attachment_state.setColorBlendOp(vk::BlendOp::eAdd);
+				color_blend_attachment_state.setSrcAlphaBlendFactor(vk::BlendFactor::eZero);
+				color_blend_attachment_state.setDstAlphaBlendFactor(vk::BlendFactor::eZero);
+				color_blend_attachment_state.setAlphaBlendOp(vk::BlendOp::eAdd);
+			}
+			vk::ColorComponentFlags single_channel = vk::ColorComponentFlagBits::eR;
+			color_blend_attachment_state.setColorWriteMask(single_channel);
+			color_blend_attachments.push_back(color_blend_attachment_state);
+		}
+	}
+	if (params.color_attachments_blending_enabled_) {
+		rassert(color_blend_attachments.size() > 0, 221107316);
+	}
+	vk::PipelineColorBlendStateCreateInfo pipeline_color_blend;
+	pipeline_color_blend.setAttachments(color_blend_attachments);
+	vk::PipelineDynamicStateCreateInfo pipeline_dynamic({}, dynamic_states);
+
+	vk::GraphicsPipelineCreateInfo graphics_pipeline_create_info(
+		{},
+		pipeline_stages,
+		&pipeline_vertex_input,
+		&pipeline_input_assembly,
+		nullptr,
+		&pipeline_viewport,
+		&pipeline_rasterization,
+		&pipeline_multisample,
+		&pipeline_depth_stencil,
+		&pipeline_color_blend,
+		&pipeline_dynamic,
+		pipeline_layout,
+		vk::RenderPass(render_pass)
+	);
+
+	vk::Optional<const vk::raii::PipelineCache> no_pipeline_cache = nullptr;
+	vk::raii::Pipeline pipeline(vk->getDevice(), no_pipeline_cache, graphics_pipeline_create_info);
+
+	std::shared_ptr<VulkanRasterPipeline> raster_pipeline = std::make_shared<VulkanRasterPipeline>();
+	raster_pipeline->create(std::move(descriptor_set_layout_raii), std::move(descriptor_set_layout_rassert_raii), std::move(pipeline_layout), std::move(render_pass), std::move(pipeline), std::move(pipeline_stages_shader_module_info));
+	return raster_pipeline;
+}
+
+std::shared_ptr<avk2::VulkanRasterPipeline> avk2::KernelSource::getRasterPipeline(const std::shared_ptr<VulkanEngine> &vk, const RenderBuilder &params)
+{
+	rassert(isRasterization(), 2026031514151300005);
+	std::string family_key = getRasterCacheFamilyKey();
+	std::string variant_key = getRasterCacheVariantKey(vk, params);
+	return vk->getOrCreateRasterPipeline(family_key, variant_key, [&]() {
+		timer tm;
+		tm.start();
+		std::shared_ptr<VulkanRasterPipeline> pipeline = compileRasterPipeline(vk, params);
+		double compilation_time = tm.elapsed();
+		if (compilation_time > 0.1) {
+			std::cout << "Vulkan raster pipeline compilation done in " << compilation_time << " seconds for " << vk->device().name << std::endl;
+		}
+		return pipeline;
+	});
 }
 
 bool avk2::KernelSource::parseArg(std::vector<avk2::KernelSource::Arg> &args, const Arg &arg)
@@ -1332,7 +1632,7 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 	gpu::Context context;
 
-	VulkanKernel *kernel = getKernel(context.vk()); // constructing pipeline
+	std::shared_ptr<VulkanKernel> kernel = getKernel(context.vk()); // constructing pipeline
 
 	std::vector<Arg> args = parseArgs(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15, arg16, arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24, arg25, arg26, arg27, arg28, arg29, arg30, arg31, arg32, arg33, arg34, arg35, arg36, arg37, arg38, arg39, arg40);
 
@@ -1490,111 +1790,29 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 	total_t.start();
 
 	gpu::Context context;
-
-	// TODO: rework this:
-	// getDescriptorTypes
-	// descriptorSetLayout
-	// VulkanKernel *kernel = getKernel(context.vk()); //	 constructing pipeline
-
-	// TODO move these into compile Rasterization Kernel method
-	std::vector<vk::PipelineShaderStageCreateInfo> pipeline_stages;
-	std::vector<vk::DescriptorType> descriptor_types;
+	std::shared_ptr<VulkanRasterPipeline> raster_pipeline = getRasterPipeline(context.vk(), params);
+	const std::vector<vk::DescriptorType> &descriptor_types = raster_pipeline->getDescriptorTypes();
 	std::shared_ptr<vk::raii::DescriptorSet> descriptor_set;
 	std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
-	std::shared_ptr<vk::raii::DescriptorSetLayout> descriptor_set_layout_raii;
-	std::shared_ptr<vk::raii::DescriptorSetLayout> descriptor_set_layout_rassert_raii;
-	bool is_rassert_used = false;
+	bool is_rassert_used = raster_pipeline->isRassertUsed();
 	gpu::gpu_mem_32u rassert_code_and_line_;
-	std::shared_ptr<vk::raii::PipelineLayout> pipeline_layout;
-	std::vector<std::shared_ptr<vk::raii::ShaderModule>> shader_modules;
-	std::vector<avk2::ShaderModuleInfo> pipeline_stages_shader_module_info;
-	{
-		// ensuring that rasterization shaders are vert->frag or vert->tesc->tese->frag
-		rassert(shaders_programs_.size() == 2 || shaders_programs_.size() == 4, 310992267);
-		if (shaders_programs_.size() == 2) {
-			rassert(shaders_programs_[0]->isProgramNameEndsWith("_vert"), 997669760); // a vertex shader
-			rassert(shaders_programs_[1]->isProgramNameEndsWith("_frag"), 351354122); // a fragment shader
-		} else if (shaders_programs_.size() == 4) {
-			rassert(shaders_programs_[0]->isProgramNameEndsWith("_vert"), 997669566); // a vertex shader
-			rassert(shaders_programs_[1]->isProgramNameEndsWith("_tesc"), 997664766); // a tessellation control shader
-			rassert(shaders_programs_[2]->isProgramNameEndsWith("_tese"), 997663766); // a tessellation evaluation shader
-			rassert(shaders_programs_[3]->isProgramNameEndsWith("_frag"), 351354128); // a fragment shader
-		} else {
-			rassert(false, 674998313);
-		}
-
-		for (auto program: shaders_programs_) {
-			vk::ShaderStageFlagBits shader_stage;
-				 if (program->isProgramNameEndsWith("_vert")) shader_stage = vk::ShaderStageFlagBits::eVertex;
-			else if (program->isProgramNameEndsWith("_frag")) shader_stage = vk::ShaderStageFlagBits::eFragment;
-			else if (program->isProgramNameEndsWith("_tesc")) shader_stage = vk::ShaderStageFlagBits::eTessellationControl;
-			else if (program->isProgramNameEndsWith("_tese")) shader_stage = vk::ShaderStageFlagBits::eTessellationEvaluation;
-			else rassert(false, program->programName(), 596279565);
-
-			avk2::ShaderModuleInfo shader_module_info;
-			std::shared_ptr<vk::raii::ShaderModule> shader_module = std::make_shared<vk::raii::ShaderModule>(std::move(createShaderModule(context.vk(), *program, &shader_module_info)));
-			shader_modules.push_back(shader_module);
-
-			vk::PipelineShaderStageCreateInfo pipeline_stages_create_info({}, shader_stage, *shader_module, name_.c_str());
-			pipeline_stages.push_back(pipeline_stages_create_info);
-			pipeline_stages_shader_module_info.push_back(shader_module_info);
-		}
-
-		{
-			std::vector<vk::DescriptorSetLayout> descriptor_set_layouts_non_raii;
-
-			avk2::sh_ptr_vk_engine vk = context.vk();
-			std::set<unsigned int> descriptors_sets = avk2::ShaderModuleInfo::getMergedDescriptorsSets(pipeline_stages_shader_module_info);
-			if (descriptors_sets.count(VK_MAIN_BINDING_SET) > 0) {
-				descriptor_types = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(pipeline_stages_shader_module_info, VK_MAIN_BINDING_SET);
-				std::vector<vk::DescriptorSetLayoutBinding> descriptor_set_layout_bindings = createDescriptorSetLayoutBindings(descriptor_types, vk::ShaderStageFlagBits::eAllGraphics);
-				descriptor_set_layout_raii = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, descriptor_set_layout_bindings))));
-				descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(*descriptor_set_layout_raii, descriptor_types)));
-				descriptor_set_layouts_non_raii.push_back(*descriptor_set_layout_raii);
-			} else if (descriptors_sets.count(VK_RASSERT_CODE_SET) > 0) {
-				// we need to create empty descriptor at set#0 (i.e. VK_MAIN_BINDING_SET) so that next one will be set#1 (i.e. VK_RASSERT_CODE_SET)
-				descriptor_set_layout_raii = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, 0))));
-				descriptor_set_layouts_non_raii.push_back(*descriptor_set_layout_raii);
-			}
-
-			if (descriptors_sets.count(VK_RASSERT_CODE_SET) > 0) {
-				// it measn that that common.vk (and so rassert.vk) was included from Vulkan kernel:
-				// #include <libgpu/vulkan/vk/common.vk>
-				vk::DescriptorSetLayoutBinding descriptor_set_layout_rassert_binding(VK_RASSERT_CODE_BINDING_SLOT, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eAllGraphics);
-				std::vector<vk::DescriptorType> rassert_descriptor_types = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(pipeline_stages_shader_module_info, VK_RASSERT_CODE_SET);
-				descriptor_set_layout_rassert_raii = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(vk->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, descriptor_set_layout_rassert_binding))));
-				rassert_descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(*descriptor_set_layout_rassert_raii, rassert_descriptor_types)));
-				is_rassert_used = avk2::ShaderModuleInfo::isDescriptorUsedInAny(pipeline_stages_shader_module_info, VK_RASSERT_CODE_SET, VK_RASSERT_CODE_BINDING_SLOT);
-				if (is_rassert_used) {
-					rassert_code_and_line_.resizeN(4);
-					unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
-														  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
-														  VK_RASSERT_CODE_MAGIC_GUARDS};
-					rassert_code_and_line_.writeN(data_code_and_line, 4);
-
-					rassert(rassert_descriptor_types.size() == 1, 85374765);
-					rassert(rassert_descriptor_types[0] == vk::DescriptorType::eStorageBuffer, 132105684);
-
-					vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(rassert_code_and_line_.vkBufferData()->getBuffer(), rassert_code_and_line_.vkoffset(), rassert_code_and_line_.size());
-					vk::WriteDescriptorSet descriptor_write = vk::WriteDescriptorSet(*rassert_descriptor_set.get(), VK_RASSERT_CODE_BINDING_SLOT, 0, 1, rassert_descriptor_types[0]);
-					descriptor_write.setBufferInfo(buffer_info);
-
-					context.vk()->getDevice().updateDescriptorSets(descriptor_write, nullptr);
-				}
-				descriptor_set_layouts_non_raii.push_back(*descriptor_set_layout_rassert_raii);
-			}
-
-			vk::PipelineLayoutCreateInfo pipeline_create_info(vk::PipelineLayoutCreateFlags(), descriptor_set_layouts_non_raii);
-
-			// see https://vkguide.dev/docs/new_chapter_2/vulkan_pushconstants/ and https://vkguide.dev/docs/chapter-3/push_constants/
-			size_t push_constant_size = avk2::ShaderModuleInfo::getMergedPushConstantSize(pipeline_stages_shader_module_info);
-			std::vector<vk::PushConstantRange> push_constant_ranges = { vk::PushConstantRange(vk::ShaderStageFlagBits::eAllGraphics, 0, push_constant_size) };
-			if (push_constant_size > 0) {
-				pipeline_create_info.setPushConstantRanges(push_constant_ranges);
-			}
-
-			pipeline_layout = std::make_shared<vk::raii::PipelineLayout>(std::move(vk->getDevice().createPipelineLayout(pipeline_create_info)));
-		}
+	if (!descriptor_types.empty()) {
+		descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(raster_pipeline->descriptorSetLayout(), descriptor_types)));
+	}
+	if (is_rassert_used) {
+		std::vector<vk::DescriptorType> rassert_descriptor_types = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(raster_pipeline->shaderModuleInfos(), VK_RASSERT_CODE_SET);
+		rassert_descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(raster_pipeline->descriptorSetLayoutRassert(), rassert_descriptor_types)));
+		rassert_code_and_line_.resizeN(4);
+		unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
+											  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
+											  VK_RASSERT_CODE_MAGIC_GUARDS};
+		rassert_code_and_line_.writeN(data_code_and_line, 4);
+		rassert(rassert_descriptor_types.size() == 1, 2026031514151300006);
+		rassert(rassert_descriptor_types[0] == vk::DescriptorType::eStorageBuffer, 2026031514151300007);
+		vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(rassert_code_and_line_.vkBufferData()->getBuffer(), rassert_code_and_line_.vkoffset(), rassert_code_and_line_.size());
+		vk::WriteDescriptorSet descriptor_write = vk::WriteDescriptorSet(*rassert_descriptor_set.get(), VK_RASSERT_CODE_BINDING_SLOT, 0, 1, rassert_descriptor_types[0]);
+		descriptor_write.setBufferInfo(buffer_info);
+		context.vk()->getDevice().updateDescriptorSets(descriptor_write, nullptr);
 	}
 
 	std::vector<Arg> args_uniforms = parseArgs(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15, arg16, arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24, arg25, arg26, arg27, arg28, arg29, arg30, arg31, arg32, arg33, arg34, arg35, arg36, arg37, arg38, arg39, arg40);
@@ -1626,7 +1844,7 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			vk::ImageView image_view;
 			bool is_descriptor_used = false;
 			bool is_array = false;
-			for (auto &shader_module: pipeline_stages_shader_module_info) {
+			for (const auto &shader_module: raster_pipeline->shaderModuleInfos()) {
 				if (shader_module.isDescriptorUsed(VK_MAIN_BINDING_SET, binding)) {
 					if (!is_descriptor_used) {
 						is_array = shader_module.isImageArrayed(VK_MAIN_BINDING_SET, binding);
@@ -1655,65 +1873,6 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 	context.vk()->getDevice().updateDescriptorSets(descriptor_writes, nullptr);
 	}
 
-	std::shared_ptr<vk::raii::RenderPass> render_pass;
-	{
-		std::vector<vk::AttachmentDescription> attachments_description;
-		std::vector<vk::AttachmentReference> color_attachment_references;
-		std::shared_ptr<vk::AttachmentReference> depth_stencil_attachment;
-		size_t attachment_slot = 0;
-		for (const avk2::ImageAttachment &arg_attachment: params.depth_and_color_attachments_) {
-			const gpu::shared_device_image &image = arg_attachment.getImage();
-			for (size_t c = 0; c < image.cn(); ++c) {
-				vk::Format format;
-				if (arg_attachment.isColorAttachment()) {
-					format = context.vk()->device().typeToVkFormat(image.dataType());
-				} else {
-					rassert(arg_attachment.isDepthStencilAttachment(), 45612346132);
-					format = context.vk()->device().typeToVkDepthStencilFormat(image.dataType());
-				}
-
-				vk::AttachmentLoadOp load_op = vk::AttachmentLoadOp::eLoad; // TODO try to improve performance with vk::AttachmentLoadOp::eDontCare where possible
-				if (arg_attachment.hasClearValue()) {
-					load_op = vk::AttachmentLoadOp::eClear; // note that attachments will be cleared only in render_area
-				}
-
-				vk::ImageLayout initial_layout = vk::ImageLayout::eGeneral;
-				vk::ImageLayout final_layout = vk::ImageLayout::eGeneral;
-
-				// TODO try to improve performance with non-general layout, but it seems to be not important (and even have a negative effect) on NVIDIA and AMD desktop GPUs:
-				// - https://www.reddit.com/r/vulkan/comments/1b72me6/comment/ktfqczw
-				// - https://www.reddit.com/r/vulkan/comments/1b72me6/comment/ktl6wm6
-				// - https://www.reddit.com/r/vulkan/comments/104hmyx/comment/j38rlp1
-	//			if (attachment.isDepthStencilAttachment()) {
-	//				initial_layout = final_layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
-	//			} else {
-	//				initial_layout = final_layout = vk::ImageLayout::eColorAttachmentOptimal;
-	//			}
-
-				attachments_description.push_back(vk::AttachmentDescription({}, format, vk::SampleCountFlagBits::e1,
-																			load_op, vk::AttachmentStoreOp::eStore, load_op, vk::AttachmentStoreOp::eStore, // TODO try to improve performance with vk::AttachmentStoreOp::eDontCare where possible
-																			initial_layout, final_layout));
-				arg_attachment.getImage().vkImageData()->updateLayout(initial_layout, final_layout);
-				if (arg_attachment.isColorAttachment()) {
-					color_attachment_references.push_back(vk::AttachmentReference(attachment_slot, final_layout));
-				} else {
-					rassert(arg_attachment.isDepthStencilAttachment(), 167326983);
-					rassert(!depth_stencil_attachment, 236398326); // checking that depth attachment is unique
-					depth_stencil_attachment = std::shared_ptr<vk::AttachmentReference>(new vk::AttachmentReference(attachment_slot, final_layout));
-				}
-				++attachment_slot;
-			}
-			size_t nattachments = attachment_slot;
-			rassert(nattachments <= VK_MAX_FRAGMENT_OUTPUT_ATTACHMENTS_USED, nattachments, 736698915);
-		}
-
-		// see https://github.com/SaschaWillems/Vulkan/blob/9756ad8c2368e0b94f149a9dc20a47b253feceff/examples/triangle/triangle.cpp#L582
-		// see about input attachments (they are limited to pixel-local access so we don't use them) - https://www.saschawillems.de/blog/2018/07/19/vulkan-input-attachments-and-sub-passes
-		vk::SubpassDescription subpass({}, vk::PipelineBindPoint::eGraphics, {}, color_attachment_references, {}, depth_stencil_attachment.get(), {});
-		vk::RenderPassCreateInfo render_pass_create_info({}, attachments_description, subpass, {});
-		render_pass = std::shared_ptr<vk::raii::RenderPass>(new vk::raii::RenderPass(context.vk()->getDevice(), render_pass_create_info));
-	}
-
 	std::shared_ptr<vk::raii::Framebuffer> framebuffer;
 	{
 		std::vector<vk::ImageView> attachments_image_views;
@@ -1722,96 +1881,14 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			const gpu::shared_device_image &image = arg_attachment.getImage();
 			for (size_t c = 0; c < image.cn(); ++c) {
 				attachments_image_views.push_back(arg_attachment.getImage().vkImageData()->getImageChannelView(c));
+				arg_attachment.getImage().vkImageData()->updateLayout(vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral);
 				rassert(arg_attachment.getImage().width() >= params.viewport_width_ && arg_attachment.getImage().height() >= params.viewport_height_, 131106553);
 				nlayers = 1;
 			}
 		}
 		rassert(nlayers >= 1, 488150461);
-		vk::FramebufferCreateInfo framebuffer_create_info({}, *render_pass, attachments_image_views, params.viewport_width_, params.viewport_height_, nlayers);
+		vk::FramebufferCreateInfo framebuffer_create_info({}, raster_pipeline->renderPass(), attachments_image_views, params.viewport_width_, params.viewport_height_, nlayers);
 		framebuffer = std::shared_ptr<vk::raii::Framebuffer>(new vk::raii::Framebuffer(context.vk()->getDevice(), framebuffer_create_info));
-	}
-
-	// see https://github.com/KhronosGroup/Vulkan-Hpp/blob/main/vk_raii_ProgrammingGuide.md#15-drawing-a-cube
-	std::shared_ptr<vk::raii::Pipeline> graphics_pipeline;
-	{
-		std::vector<vk::DynamicState> dynamic_states;
-
-		std::vector<vk::VertexInputBindingDescription> vertex_binding_descriptions = { params.geometry_vertices_.buildBindingDescription() };
-		std::vector<vk::VertexInputAttributeDescription> vertex_attribute_descriptions = params.geometry_vertices_.buildAttributeDescriptions();
-		vk::PipelineVertexInputStateCreateInfo pipeline_vertex_input({}, vertex_binding_descriptions, vertex_attribute_descriptions);
-
-		// see https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#drawing-triangle-lists-with-adjacency
-		vk::PrimitiveTopology primitive_topology = params.faces_with_adjacency_ ? vk::PrimitiveTopology::eTriangleListWithAdjacency : vk::PrimitiveTopology::eTriangleList;
-		vk::PipelineInputAssemblyStateCreateInfo pipeline_input_assembly({}, primitive_topology);
-
-		dynamic_states.push_back(vk::DynamicState::eViewport);
-		dynamic_states.push_back(vk::DynamicState::eScissor);
-		vk::PipelineViewportStateCreateInfo pipeline_viewport({}, 1, nullptr, 1, nullptr); // we don't specify viewport and scissor because they are specified dynamically
-
-		vk::PipelineRasterizationStateCreateInfo pipeline_rasterization({}, vk::False, vk::False, vk::PolygonMode::eFill, vk::CullModeFlagBits::eNone);
-		if (params.polygon_mode_wireframe_) {
-			pipeline_rasterization.polygonMode = vk::PolygonMode::eLine;
-		}
-		pipeline_rasterization.lineWidth = 1.0f; // to fix Validation Error: [ VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749 ] | ... | vkCreateGraphicsPipelines(): pCreateInfos[0].pRasterizationState->lineWidth is 0.000000, but the line width state is static (pCreateInfos[0].pDynamicState->pDynamicStates does not contain VK_DYNAMIC_STATE_LINE_WIDTH) and wideLines feature was not enabled. The Vulkan spec states: If the pipeline requires pre-rasterization shader state, and the wideLines feature is not enabled, and no element of the pDynamicStates member of pDynamicState is VK_DYNAMIC_STATE_LINE_WIDTH, the lineWidth member of pRasterizationState must be 1.0 (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-00749)
-		vk::PipelineMultisampleStateCreateInfo pipeline_multisample({}, vk::SampleCountFlagBits::e1);
-		vk::PipelineDepthStencilStateCreateInfo pipeline_depth_stencil({}, vk::True, params.depth_write_enable_, vk::CompareOp::eLessOrEqual, vk::False, vk::False);
-
-		// Color blend state describes how blend factors are calculated (if used)
-		// We need one blend attachment state per color attachment (even if blending is not used)
-		std::vector<vk::PipelineColorBlendAttachmentState> color_blend_attachments;
-		for (const avk2::ImageAttachment &arg_attachment: params.depth_and_color_attachments_) {
-			const gpu::shared_device_image &image = arg_attachment.getImage();
-			for (size_t c = 0; c < image.cn(); ++c) {
-				if (arg_attachment.isColorAttachment()) {
-					vk::PipelineColorBlendAttachmentState color_blend_attachment_state(vk::False);
-					if (params.color_attachments_blending_enabled_) {
-						// see https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions#page_Color-blending
-						// finalColor.rgb = (srcColorBlendFactor * newColor.rgb) <colorBlendOp> (dstColorBlendFactor * oldColor.rgb);
-						// and in our case it is trivial:
-						// finalColor.r = (1 * newColor.r) + (1 * oldColor.r);
-						color_blend_attachment_state.setBlendEnable(vk::True);
-						color_blend_attachment_state.setSrcColorBlendFactor(vk::BlendFactor::eOne);
-						color_blend_attachment_state.setDstColorBlendFactor(vk::BlendFactor::eOne);
-						color_blend_attachment_state.setColorBlendOp(vk::BlendOp::eAdd);
-						// let's explicitly state that we don't use alpha - because we create separate image attachment per channel:
-						color_blend_attachment_state.setSrcAlphaBlendFactor(vk::BlendFactor::eZero);
-						color_blend_attachment_state.setDstAlphaBlendFactor(vk::BlendFactor::eZero);
-						color_blend_attachment_state.setAlphaBlendOp(vk::BlendOp::eAdd);
-					}
-					vk::ColorComponentFlags single_channel = vk::ColorComponentFlagBits::eR;
-					color_blend_attachment_state.setColorWriteMask(single_channel);
-					color_blend_attachments.push_back(color_blend_attachment_state);
-				}
-			}
-		}
-		if (params.color_attachments_blending_enabled_) {
-			rassert(color_blend_attachments.size() > 0, 221107316);
-		}
-		vk::PipelineColorBlendStateCreateInfo pipeline_color_blend;
-		pipeline_color_blend.setAttachments(color_blend_attachments);
-
-		// pipeline_color_blend.setAttachments(); // TODO specify color blending if needed
-		vk::PipelineDynamicStateCreateInfo pipeline_dynamic({}, dynamic_states);
-
-		vk::GraphicsPipelineCreateInfo graphics_pipeline_create_info(
-			{},
-			pipeline_stages, // TODO create on per-shader stage basis?
-			&pipeline_vertex_input,
-			&pipeline_input_assembly,
-			nullptr, // pTessellationState
-			&pipeline_viewport,
-			&pipeline_rasterization,
-			&pipeline_multisample,
-			&pipeline_depth_stencil,
-			&pipeline_color_blend,
-			&pipeline_dynamic,
-			*pipeline_layout, // TODO: rework this
-			vk::RenderPass(*render_pass)
-		);
-
-		// TODO it should be cached (assuming any property haven't changed)
-		vk::Optional<const vk::raii::PipelineCache> no_pipeline_cache = nullptr; // TODO we can try to use persistent vk::raii::PipelineCache for faster first rendering - can be important for multiprocess cluster processing
-		graphics_pipeline = std::shared_ptr<vk::raii::Pipeline>(new vk::raii::Pipeline(context.vk()->getDevice(), no_pipeline_cache, graphics_pipeline_create_info));
 	}
 
 	{
@@ -1845,9 +1922,9 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 				}
 			}
 		}
-		vk::RenderPassBeginInfo render_pass_begin_info(*render_pass, *framebuffer, render_area, clear_values);
+		vk::RenderPassBeginInfo render_pass_begin_info(raster_pipeline->renderPass(), *framebuffer, render_area, clear_values);
 		command_buffer.beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
-		command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphics_pipeline);
+		command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipeline());
 
 		std::vector<vk::DescriptorSet> descriptor_sets_non_raii;
 		unsigned int first_set = std::numeric_limits<unsigned int>::max();
@@ -1860,13 +1937,13 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 			descriptor_sets_non_raii.push_back(*rassert_descriptor_set);
 		}
 		if (descriptor_sets_non_raii.size() > 0) {
-			command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout, first_set, descriptor_sets_non_raii, nullptr);
+			command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, raster_pipeline->pipelineLayout(), first_set, descriptor_sets_non_raii, nullptr);
 		}
  
 		// we don't use C++ API here because we want to manually specify size of push constant (via passing push_constant_.size())
 		if (params.push_constant_.size() > 0) {
 			rassert(VKF.vkCmdPushConstants, 3157231286379363);
-			VKF.vkCmdPushConstants(vk::CommandBuffer(command_buffer), VkPipelineLayout(**pipeline_layout), VK_SHADER_STAGE_ALL_GRAPHICS, 0, params.push_constant_.size(), params.push_constant_.ptr());
+			VKF.vkCmdPushConstants(vk::CommandBuffer(command_buffer), VkPipelineLayout(vk::PipelineLayout(raster_pipeline->pipelineLayout())), VK_SHADER_STAGE_ALL_GRAPHICS, 0, params.push_constant_.size(), params.push_constant_.ptr());
 		}
 
 		rassert(params.viewport_min_depth_ >= 0.0f && params.viewport_max_depth_ <= 1.0f, 691689354);
@@ -2000,6 +2077,23 @@ vk::Buffer avk2::VertexInput::buffer() const
 vk::Buffer avk2::IndicesInput::buffer() const
 {
 	return buffer_.vkBufferData()->getBuffer();
+}
+
+void avk2::VulkanRasterPipeline::create(vk::raii::DescriptorSetLayout &&descriptor_set_layout,
+										vk::raii::DescriptorSetLayout &&descriptor_set_layout_for_rassert,
+										vk::raii::PipelineLayout &&pipeline_layout,
+										vk::raii::RenderPass &&render_pass,
+										vk::raii::Pipeline &&pipeline,
+										std::vector<avk2::ShaderModuleInfo> &&shader_module_infos)
+{
+	descriptor_set_layout_ = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(descriptor_set_layout));
+	descriptor_set_layout_rassert_ = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(descriptor_set_layout_for_rassert));
+	pipeline_layout_ = std::make_shared<vk::raii::PipelineLayout>(std::move(pipeline_layout));
+	render_pass_ = std::make_shared<vk::raii::RenderPass>(std::move(render_pass));
+	pipeline_ = std::make_shared<vk::raii::Pipeline>(std::move(pipeline));
+	shader_module_infos_ = std::make_shared<std::vector<avk2::ShaderModuleInfo>>(std::move(shader_module_infos));
+	descriptor_types_ = avk2::ShaderModuleInfo::getMergedDescriptorsTypes(*shader_module_infos_, VK_MAIN_BINDING_SET);
+	is_rassert_used_ = avk2::ShaderModuleInfo::isDescriptorUsedInAny(*shader_module_infos_, VK_RASSERT_CODE_SET, VK_RASSERT_CODE_BINDING_SLOT);
 }
 
 void avk2::VulkanKernelArg::init()

@@ -20,8 +20,17 @@
 - Создан новый prompt file для отдельной задачи по добавлению кэширования Vulkan pipeline.
 - Подготовлен подробный рабочий план: generic LRU, Vulkan compute/raster caches, unit tests, stress test.
 - Добавлено правило в `AGENTS.md` про структуру commit message и создан файл документации с планом работ.
+- Добавлен generic `libbase::LruCache` и покрыт unit tests.
+- В `VulkanEngine` добавлены compute/raster pipeline caches со stats, debug logging и capacity per family.
+- Compute cache переведён с временного `KernelSource::id_` на stable reuse внутри `VulkanEngine`.
+- Raster pipeline сборка вынесена в отдельный cached path и переиспользуется между запусками с одинаковым pipeline-affecting state.
+- Добавлены новые Vulkan tests на correctness, hit/miss и stress speedup.
+- Для требования про старую кодовую базу создан временный `git worktree` на коммите до cache-рефакторинга и там отдельно прогнан standalone compute correctness test.
 
 ## Короткий лог результатов
 
 - Задача зафиксирована и готова к последующей работе в рамках этого prompt file.
 - План зафиксирован в документации и готов к поэтапной реализации.
+- `./build/libs/gpu/libgpu_test --gtest_filter='lru_cache.*:vulkan.computeKernelWorksWithDifferentArguments:vulkan.computePipelineCacheTracksHitsAndMisses:vulkan.rasterPipelineCacheTracksHitsAndMisses:vulkan.computePipelineCacheStressShowsSignificantSpeedup'` проходит.
+- Stress test показал заметное ускорение compute launch preparing time: около `29x` на локальном Vulkan устройстве `llvmpipe`.
+- В отдельном old-code worktree тест `vulkan.computeKernelWorksWithDifferentArgumentsOldCode` прошёл на коммите до внедрения нового cache API.

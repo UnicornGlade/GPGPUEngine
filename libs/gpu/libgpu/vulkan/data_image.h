@@ -49,6 +49,7 @@ namespace avk2 {
 
 			VkFlags getAspectFlags() const;
 			vk::ImageLayout getCurrentLayout() const;
+			vk::Format getFormat() const	{ return format_; }
 
 			size_t width() const		{	return width_;		}
 			size_t height() const		{	return height_;		}

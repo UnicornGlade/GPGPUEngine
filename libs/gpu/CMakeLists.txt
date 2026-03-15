@@ -81,6 +81,7 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/buffers_magic_guards_test.cpp
         libgpu/vulkan/tests/image_conversion_from_float_to_T_test.cpp
         libgpu/vulkan/tests/interpolation_test.cpp
+        libgpu/vulkan/tests/pipeline_cache_test.cpp
         libgpu/vulkan/tests/main.cpp
         libgpu/vulkan/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/rasterization_blending_test.cpp
