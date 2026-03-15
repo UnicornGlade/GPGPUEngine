@@ -85,6 +85,7 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/rasterization_blending_test.cpp
         libgpu/vulkan/tests/rasterization_test.cpp
+        libgpu/lru_cache_test.cpp
         libgpu/device_test.cpp
         )
 

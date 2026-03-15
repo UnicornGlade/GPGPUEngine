@@ -6,6 +6,7 @@ set(HEADERS
         libbase/data_type.h
         libbase/fast_random.h
         libbase/gtest_utils.h
+        libbase/lru_cache.h
         libbase/math.h
         libbase/omp_utils.h
         libbase/platform.h
