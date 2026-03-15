@@ -481,6 +481,7 @@ namespace avk2 {
 		std::shared_ptr<VulkanRasterPipeline> getOrCreateRasterPipeline(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanRasterPipeline>()> &create_fn);
 		void							retireCompletedInflightComputeLaunches();
 		void							waitForInflightComputeLaunch(InflightComputeLaunch &launch);
+		void							finishInflightComputeLaunchAfterFence(InflightComputeLaunch &launch);
 		void							eraseInflightComputeLaunch(uint64_t submit_id);
 		bool							doResourceAccessesConflict(const std::vector<ResourceAccessRecord> &lhs, const std::vector<ResourceAccessRecord> &rhs) const;
 		void							waitForConflictingInflightLaunches(const std::vector<ResourceAccessRecord> &resource_accesses);

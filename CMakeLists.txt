@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Если вы установили CUDA SDK - можете включить поддержку CUDA
 option(GPU_CUDA_SUPPORT "CUDA support." OFF)
+option(GPGPU_ENABLE_NVTX_MARKERS "Enable NVTX markers for profiling." OFF)
 
 # GLSLC_BIN используйтся для компиляции Vulkan шейдеров (GLSL)
 if (NOT DEFINED GLSLC_BIN)
@@ -33,6 +34,10 @@ else ()
     # Это не ошибка т.к. если нет OpenMP - код будет работать, просто директивы распараллеливания ничего не будут делать
     message(WARNING "OpenMP not found!")
     set(OPENMP_CXX_LINK_TARGET "")
+endif ()
+
+if (GPGPU_ENABLE_NVTX_MARKERS)
+    add_compile_definitions(GPGPU_ENABLE_NVTX_MARKERS=1)
 endif ()
 
 add_subdirectory(libs)

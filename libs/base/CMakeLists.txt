@@ -8,6 +8,7 @@ set(HEADERS
         libbase/gtest_utils.h
         libbase/lru_cache.h
         libbase/math.h
+        libbase/nvtx_markers.h
         libbase/omp_utils.h
         libbase/platform.h
         libbase/point.h

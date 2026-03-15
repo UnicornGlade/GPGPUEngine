@@ -1,5 +1,6 @@
 #include "engine.h"
 
+#include "libbase/nvtx_markers.h"
 #include "libbase/timer.h"
 #include <libgpu/context.h>
 #include <libgpu/shared_device_buffer.h>
@@ -26,6 +27,16 @@
 #endif
 
 namespace {
+	void checkVulkanRassertWords(const unsigned int *data_code_and_line)
+	{
+		rassert(data_code_and_line[0] == VK_RASSERT_CODE_MAGIC_GUARDS, 873958803);
+		rassert(data_code_and_line[3] == VK_RASSERT_CODE_MAGIC_GUARDS, 453451234);
+
+		unsigned int code = data_code_and_line[1];
+		unsigned int line = data_code_and_line[2];
+		rassert_gpu(code == VK_RASSERT_CODE_EMPTY && line == VK_RASSERT_LINE_EMPTY, "Vulkan kernel detected error on GPU with code=" + to_string(code) + " at kernel line=" + to_string(line));
+	}
+
 	bool isEnvEnabled(const char *env_name, bool default_value)
 	{
 		const char *value = std::getenv(env_name);
@@ -758,6 +769,7 @@ uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
 
 void avk2::VulkanEngine::appendCompletedComputeInterval(const InflightComputeLaunch &launch)
 {
+	profiling::ScopedRange scope("vk async collect timestamps", 0xFF7F8C8D);
 	if (!async_compute_timestamps_enabled_) {
 		++async_compute_stats_.launches_count;
 		return;
@@ -774,9 +786,21 @@ void avk2::VulkanEngine::appendCompletedComputeInterval(const InflightComputeLau
 
 void avk2::VulkanEngine::waitForInflightComputeLaunch(InflightComputeLaunch &launch)
 {
-	VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(*launch.fence), true, VULKAN_TIMEOUT_NANOSECS), 2026031517255500005);
-	appendCompletedComputeInterval(launch);
+	{
+		profiling::ScopedRange scope("vk async wait fence", 0xFFD35400);
+		VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(*launch.fence), true, VULKAN_TIMEOUT_NANOSECS), 2026031517255500005);
+	}
+	finishInflightComputeLaunchAfterFence(launch);
+}
+
+void avk2::VulkanEngine::finishInflightComputeLaunchAfterFence(InflightComputeLaunch &launch)
+{
+	{
+		profiling::ScopedRange scope("vk async append interval", 0xFF7F8C8D);
+		appendCompletedComputeInterval(launch);
+	}
 	if (launch.kernel && launch.rassert_slot >= 0) {
+		profiling::ScopedRange scope("vk async check rassert", 0xFFC0392B);
 		launch.kernel->checkRassertCode(static_cast<size_t>(launch.rassert_slot));
 	}
 }
@@ -801,9 +825,11 @@ void avk2::VulkanEngine::eraseInflightComputeLaunch(uint64_t submit_id)
 
 void avk2::VulkanEngine::retireCompletedInflightComputeLaunches()
 {
+	profiling::ScopedRange retire_scope("vk async retire completed launches", 0xFF566573);
 	for (;;) {
 		std::optional<InflightComputeLaunch> ready_launch;
 		{
+			profiling::ScopedRange scope("vk async scan fence status", 0xFF5D6D7E);
 			Lock lock(inflight_compute_launches_mutex_);
 			for (const InflightComputeLaunch &launch : inflight_compute_launches_) {
 				vk::Result fence_status = (*getDevice()).getFenceStatus(vk::Fence(*launch.fence));
@@ -817,7 +843,8 @@ void avk2::VulkanEngine::retireCompletedInflightComputeLaunches()
 			return;
 		}
 		try {
-			waitForInflightComputeLaunch(*ready_launch);
+			profiling::ScopedRange scope("vk async retire one launch", 0xFFAF7AC5);
+			finishInflightComputeLaunchAfterFence(*ready_launch);
 		} catch (...) {
 			eraseInflightComputeLaunch(ready_launch->submit_id);
 			throw;
@@ -898,7 +925,7 @@ void avk2::VulkanEngine::waitForAllInflightComputeLaunches()
 			}
 		}
 		if (!has_launch) {
-			return;
+			break;
 		}
 
 		try {
@@ -1491,6 +1518,7 @@ void avk2::VulkanEngine::writeBuffer(const avk2::raii::BufferData &buffer_dst, s
 
 void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, size_t offset, size_t size, void *dst)
 {
+	profiling::ScopedRange scope("vk readBuffer", 0xFF1F618D);
 	Lock staging_buffers_lock(staging_read_buffers_mutex_);
 
 	// we re-use two staged buffers for double buffering-like scheme (to do memcpy and PCI-E transfer in parallel in async fashion)
@@ -1530,6 +1558,7 @@ void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, si
 
 		if (is_cur_chunk_exists) {
 			rassert(fence != nullptr, 554624331241);
+			profiling::ScopedRange wait_scope("vk readBuffer wait fence", 0xFF2874A6);
 			VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(*fence), true, VULKAN_TIMEOUT_NANOSECS), 675623543242141);
 		}
 	}
@@ -2610,15 +2639,7 @@ void avk2::VulkanKernel::checkRassertCode(size_t slot)
 	rassert(slot < rassert_code_and_line_.size(), 2026031517471400003, slot, rassert_code_and_line_.size());
 	unsigned int data_code_and_line[4] = {0, 239, 17, 0};
 	rassert_code_and_line_[slot].readN(data_code_and_line, 4);
-
-	// if there is out-of-bounds writing in some kernels - they can accidentally write their trash values into code/line memory bytes
-	// so let's check that magic guards were untouched (if there are out-of-bounds writing - it will probably overwrite magic guards too)
-	rassert(data_code_and_line[0] == VK_RASSERT_CODE_MAGIC_GUARDS, 873958803);
-	rassert(data_code_and_line[3] == VK_RASSERT_CODE_MAGIC_GUARDS, 453451234);
-
-	unsigned int code = data_code_and_line[1];
-	unsigned int line = data_code_and_line[2];
-	rassert_gpu(code == VK_RASSERT_CODE_EMPTY && line == VK_RASSERT_LINE_EMPTY, "Vulkan kernel detected error on GPU with code=" + to_string(code) + " at kernel line=" + to_string(line));
+	checkVulkanRassertWords(data_code_and_line);
 }
 
 avk2::RenderBuilder::RenderBuilder(KernelSource &kernel, size_t width, size_t height)

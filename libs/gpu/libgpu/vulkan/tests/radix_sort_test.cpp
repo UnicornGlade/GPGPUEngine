@@ -6,6 +6,7 @@
 
 #include <libbase/runtime_assert.h>
 #include <libbase/fast_random.h>
+#include <libbase/nvtx_markers.h>
 #include <libbase/stats.h>
 #include <libbase/timer.h>
 #include <libgpu/shared_device_buffer.h>
@@ -100,36 +101,55 @@ TEST(vulkan, radixSort)
 		}
 		rassert(!reduction_buffers.empty(), 2026031502014000006, block_hist_size);
 
-		input_gpu.writeN(input.data(), n);
+		{
+			profiling::ScopedRange scope("vk radix upload input", 0xFF1ABC9C);
+			input_gpu.writeN(input.data(), n);
+		}
 
 		std::vector<double> gpu_times;
 		for (int iter = 0; iter < 10; ++iter) {
 			timer gpu_timer;
 			for (unsigned int pass = 0; pass < (sizeof(unsigned int) << 1); ++pass) {
+				profiling::ScopedRange pass_scope("vk radix pass", 0xFF4472C4);
 				const unsigned int shift = pass << 2;
 				const gpu::gpu_mem_32u& in = (pass == 0u) ? input_gpu : tmp_gpu;
 
-				local_counting.exec(VulkanLocalCountingParams{shift, n}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu);
-				reduction.exec(VulkanReductionParams{block_hist_size, reduction_sizes.front()}, gpu::WorkSize(BLOCK_THREADS, reduction_sizes.front()), block_hist_gpu, reduction_buffers.front());
+				{
+					profiling::ScopedRange phase_scope("vk radix local_counting", 0xFF2E8B57);
+					local_counting.exec(VulkanLocalCountingParams{shift, n}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu);
+				}
+				{
+					profiling::ScopedRange phase_scope("vk radix reduction root", 0xFFE67E22);
+					reduction.exec(VulkanReductionParams{block_hist_size, reduction_sizes.front()}, gpu::WorkSize(BLOCK_THREADS, reduction_sizes.front()), block_hist_gpu, reduction_buffers.front());
+				}
 				for (size_t level = 1; level < reduction_buffers.size(); ++level) {
+					profiling::ScopedRange phase_scope("vk radix reduction level", 0xFFE67E22);
 					reduction.exec(VulkanReductionParams{reduction_sizes[level - 1], reduction_sizes[level]},
 								   gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
 								   reduction_buffers[level - 1],
 								   reduction_buffers[level]);
 				}
 				for (int level = static_cast<int>(reduction_buffers.size()) - 2; level >= 0; --level) {
+					profiling::ScopedRange phase_scope("vk radix accumulation level", 0xFF8E44AD);
 					accumulation.exec(VulkanAccumulationParams{reduction_sizes[level]},
 									  gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
 									  reduction_buffers[level],
 									  reduction_buffers[level + 1]);
 				}
-				accumulation.exec(VulkanAccumulationParams{block_hist_size},
-								  gpu::WorkSize(BLOCK_THREADS, block_hist_size),
-								  block_hist_gpu,
-								  reduction_buffers.front());
+				{
+					profiling::ScopedRange phase_scope("vk radix accumulation root", 0xFF8E44AD);
+					accumulation.exec(VulkanAccumulationParams{block_hist_size},
+									  gpu::WorkSize(BLOCK_THREADS, block_hist_size),
+									  block_hist_gpu,
+									  reduction_buffers.front());
+				}
 
-				scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu, output_gpu, reduction_buffers.back());
+				{
+					profiling::ScopedRange phase_scope("vk radix scatter", 0xFFC0392B);
+					scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu, output_gpu, reduction_buffers.back());
+				}
 				if (pass + 1u < (sizeof(unsigned int) << 1)) {
+					profiling::ScopedRange phase_scope("vk radix copy", 0xFF16A085);
 					copy_kernel.exec(VulkanFillCopyParams{n}, gpu::WorkSize(BLOCK_THREADS, n), tmp_gpu, output_gpu);
 				}
 			}
@@ -137,30 +157,46 @@ TEST(vulkan, radixSort)
 		}
 		context.vk()->resetAsyncComputeStats();
 		for (unsigned int pass = 0; pass < (sizeof(unsigned int) << 1); ++pass) {
+			profiling::ScopedRange pass_scope("vk radix pass", 0xFF4472C4);
 			const unsigned int shift = pass << 2;
 			const gpu::gpu_mem_32u& in = (pass == 0u) ? input_gpu : tmp_gpu;
 
-			local_counting.exec(VulkanLocalCountingParams{shift, n}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu);
-			reduction.exec(VulkanReductionParams{block_hist_size, reduction_sizes.front()}, gpu::WorkSize(BLOCK_THREADS, reduction_sizes.front()), block_hist_gpu, reduction_buffers.front());
+			{
+				profiling::ScopedRange phase_scope("vk radix local_counting", 0xFF2E8B57);
+				local_counting.exec(VulkanLocalCountingParams{shift, n}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu);
+			}
+			{
+				profiling::ScopedRange phase_scope("vk radix reduction root", 0xFFE67E22);
+				reduction.exec(VulkanReductionParams{block_hist_size, reduction_sizes.front()}, gpu::WorkSize(BLOCK_THREADS, reduction_sizes.front()), block_hist_gpu, reduction_buffers.front());
+			}
 			for (size_t level = 1; level < reduction_buffers.size(); ++level) {
+				profiling::ScopedRange phase_scope("vk radix reduction level", 0xFFE67E22);
 				reduction.exec(VulkanReductionParams{reduction_sizes[level - 1], reduction_sizes[level]},
 							   gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
 							   reduction_buffers[level - 1],
 							   reduction_buffers[level]);
 			}
 			for (int level = static_cast<int>(reduction_buffers.size()) - 2; level >= 0; --level) {
+				profiling::ScopedRange phase_scope("vk radix accumulation level", 0xFF8E44AD);
 				accumulation.exec(VulkanAccumulationParams{reduction_sizes[level]},
 								  gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
 								  reduction_buffers[level],
 								  reduction_buffers[level + 1]);
 			}
-			accumulation.exec(VulkanAccumulationParams{block_hist_size},
-							  gpu::WorkSize(BLOCK_THREADS, block_hist_size),
-							  block_hist_gpu,
-							  reduction_buffers.front());
+			{
+				profiling::ScopedRange phase_scope("vk radix accumulation root", 0xFF8E44AD);
+				accumulation.exec(VulkanAccumulationParams{block_hist_size},
+								  gpu::WorkSize(BLOCK_THREADS, block_hist_size),
+								  block_hist_gpu,
+								  reduction_buffers.front());
+			}
 
-			scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu, output_gpu, reduction_buffers.back());
+			{
+				profiling::ScopedRange phase_scope("vk radix scatter", 0xFFC0392B);
+				scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu, output_gpu, reduction_buffers.back());
+			}
 			if (pass + 1u < (sizeof(unsigned int) << 1)) {
+				profiling::ScopedRange phase_scope("vk radix copy", 0xFF16A085);
 				copy_kernel.exec(VulkanFillCopyParams{n}, gpu::WorkSize(BLOCK_THREADS, n), tmp_gpu, output_gpu);
 			}
 		}
@@ -172,12 +208,20 @@ TEST(vulkan, radixSort)
 				  << gpu_memory_size_gb / stats::median(gpu_times) << " GB/s ("
 				  << n / 1000.0 / 1000.0 / stats::median(gpu_times) << " uint millions/s)" << std::endl;
 
-		std::vector<unsigned int> got = output_gpu.readVector();
+		std::vector<unsigned int> got;
+		{
+			profiling::ScopedRange scope("vk radix read output", 0xFFF1C40F);
+			got = output_gpu.readVector();
+		}
 		for (size_t i = 0; i < n; ++i) {
 			rassert(expected[i] == got[i], 2026031502014000007, expected[i], got[i], i);
 		}
 
-		std::vector<unsigned int> input_after = input_gpu.readVector();
+		std::vector<unsigned int> input_after;
+		{
+			profiling::ScopedRange scope("vk radix read input_after", 0xFFF1C40F);
+			input_after = input_gpu.readVector();
+		}
 		for (size_t i = 0; i < n; ++i) {
 			rassert(input_after[i] == input[i], 2026031502014000008, input_after[i], input[i], i);
 		}

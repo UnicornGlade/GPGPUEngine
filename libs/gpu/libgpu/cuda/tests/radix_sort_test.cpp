@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include <libbase/stats.h>
+#include <libbase/nvtx_markers.h>
 #include <libbase/runtime_assert.h>
 #include <libbase/fast_random.h>
 #include <libbase/timer.h>
@@ -93,20 +94,36 @@ TEST(cuda, radixSort)
 		gpu::gpu_mem_32u bin_counter_gpu(BINS_CNT);
 		gpu::gpu_mem_32u bin_base_gpu(BINS_CNT);
 
-		input_gpu.writeN(input.data(), n);
+		{
+			profiling::ScopedRange scope("cuda radix upload input", 0xFF1ABC9C);
+			input_gpu.writeN(input.data(), n);
+		}
 
 		std::vector<double> gpu_times;
 		for (int iter = 0; iter < 10; ++iter) {
 			timer gpu_timer;
 			for (unsigned int pass = 0; pass < BINS_IN_NUM; ++pass) {
+				profiling::ScopedRange pass_scope("cuda radix pass", 0xFF4472C4);
 				const unsigned int shift = pass << 2;
 				const gpu::gpu_mem_32u &in = (pass == 0) ? input_gpu : ((pass & 1u) ? tmp_gpu : output_gpu);
 				gpu::gpu_mem_32u &out = (pass == 0) ? tmp_gpu : ((pass & 1u) ? output_gpu : tmp_gpu);
 
-				cuda::radix_sort_01_local_counting(in, block_data_gpu, n, shift, blocks_cnt);
-				cuda::radix_sort_02_global_prefixes_scan_sum_reduction(block_data_gpu, block_data_gpu, bin_counter_gpu, blocks_cnt);
-				cuda::radix_sort_03_global_prefixes_scan_accumulation(bin_counter_gpu, bin_base_gpu);
-				cuda::radix_sort_04_scatter(in, block_data_gpu, bin_base_gpu, out, n, shift, blocks_cnt);
+				{
+					profiling::ScopedRange phase_scope("cuda radix local_counting", 0xFF2E8B57);
+					cuda::radix_sort_01_local_counting(in, block_data_gpu, n, shift, blocks_cnt);
+				}
+				{
+					profiling::ScopedRange phase_scope("cuda radix reduction", 0xFFE67E22);
+					cuda::radix_sort_02_global_prefixes_scan_sum_reduction(block_data_gpu, block_data_gpu, bin_counter_gpu, blocks_cnt);
+				}
+				{
+					profiling::ScopedRange phase_scope("cuda radix accumulation", 0xFF8E44AD);
+					cuda::radix_sort_03_global_prefixes_scan_accumulation(bin_counter_gpu, bin_base_gpu);
+				}
+				{
+					profiling::ScopedRange phase_scope("cuda radix scatter", 0xFFC0392B);
+					cuda::radix_sort_04_scatter(in, block_data_gpu, bin_base_gpu, out, n, shift, blocks_cnt);
+				}
 			}
 			gpu_times.push_back(gpu_timer.elapsed());
 		}
@@ -116,12 +133,20 @@ TEST(cuda, radixSort)
 				  << gpu_memory_size_gb / stats::median(gpu_times) << " GB/s ("
 				  << n / 1000.0 / 1000.0 / stats::median(gpu_times) << " uint millions/s)" << std::endl;
 
-		std::vector<unsigned int> got = output_gpu.readVector();
+		std::vector<unsigned int> got;
+		{
+			profiling::ScopedRange scope("cuda radix read output", 0xFFF1C40F);
+			got = output_gpu.readVector();
+		}
 		for (size_t i = 0; i < n; ++i) {
 			rassert(expected[i] == got[i], 2026031500375600007, expected[i], got[i], i);
 		}
 
-		std::vector<unsigned int> input_after = input_gpu.readVector();
+		std::vector<unsigned int> input_after;
+		{
+			profiling::ScopedRange scope("cuda radix read input_after", 0xFFF1C40F);
+			input_after = input_gpu.readVector();
+		}
 		for (size_t i = 0; i < n; ++i) {
 			rassert(input_after[i] == input[i], 2026031500375600008, input_after[i], input[i], i);
 		}
