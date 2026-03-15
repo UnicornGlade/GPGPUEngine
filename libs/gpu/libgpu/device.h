@@ -92,6 +92,7 @@ public:
 
 // Enumerates CUDA/OpenCL/Vulkan GPGPU devices
 std::vector<Device>	enumDevices(bool cuda_silent, bool opencl_silent, bool vk_silent);
+std::vector<Device>	applyVisibleDeviceFilter(const std::vector<Device> &devices, const std::string &visible_devices_spec);
 
 // If on the same GPU device we have combination of available APIs (OpenCL/CUDA/Vulkan) - we will detect such GPU device
 // multiple times - one time per each supported API, so we need to merge such duplicated device detections.

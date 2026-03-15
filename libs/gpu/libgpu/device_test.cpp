@@ -3,6 +3,7 @@
 #include "device.h"
 
 #include <libbase/gtest_utils.h>
+#include <stdexcept>
 
 class DeviceInfo {
 public:
@@ -168,4 +169,65 @@ TEST(gpu_device, mergeApisOnDevices)
 	// CUDA, OpenCL -> CUDA, OpenCL if devices have different PCI-E bus/device id
 	checkMergeTestCase({createCudaDevice(NAME_NV_RTX_3080).setPCI(1, 2), createOpenCLDevice(NAME_NV_RTX_3080).setPCI(3, 4)},
 					   EXPECTED_THE_SAME_DEVICES_LIST);
+}
+
+TEST(gpu_device, applyVisibleDeviceFilterKeepsRequestedIndices)
+{
+	std::vector<gpu::Device> devices = {
+		createCudaDevice(NAME_NV_RTX_3080).createDevice(),
+		createOpenCLDevice(NAME_AMD_V520).createDevice(),
+		createVulkanDevice(NAME_INTEL_ARC580).createDevice(),
+	};
+
+	std::vector<gpu::Device> filtered = gpu::applyVisibleDeviceFilter(devices, "0,2");
+
+	ASSERT_EQ(filtered.size(), 2);
+	EXPECT_EQ(filtered[0], devices[0]);
+	EXPECT_EQ(filtered[1], devices[2]);
+}
+
+TEST(gpu_device, applyVisibleDeviceFilterCanDisableAllDevices)
+{
+	std::vector<gpu::Device> devices = {
+		createCudaDevice(NAME_NV_RTX_3080).createDevice(),
+		createOpenCLDevice(NAME_AMD_V520).createDevice(),
+	};
+
+	std::vector<gpu::Device> filtered = gpu::applyVisibleDeviceFilter(devices, "");
+
+	EXPECT_TRUE(filtered.empty());
+}
+
+TEST(gpu_device, applyVisibleDeviceFilterAllowsWhitespace)
+{
+	std::vector<gpu::Device> devices = {
+		createCudaDevice(NAME_NV_RTX_3080).createDevice(),
+		createOpenCLDevice(NAME_AMD_V520).createDevice(),
+		createVulkanDevice(NAME_INTEL_ARC580).createDevice(),
+	};
+
+	std::vector<gpu::Device> filtered = gpu::applyVisibleDeviceFilter(devices, " 2, 1 ");
+
+	ASSERT_EQ(filtered.size(), 2);
+	EXPECT_EQ(filtered[0], devices[2]);
+	EXPECT_EQ(filtered[1], devices[1]);
+}
+
+TEST(gpu_device, applyVisibleDeviceFilterRejectsInvalidIndex)
+{
+	std::vector<gpu::Device> devices = {
+		createCudaDevice(NAME_NV_RTX_3080).createDevice(),
+	};
+
+	EXPECT_THROW(gpu::applyVisibleDeviceFilter(devices, "1"), std::runtime_error);
+}
+
+TEST(gpu_device, applyVisibleDeviceFilterRejectsDuplicateIndices)
+{
+	std::vector<gpu::Device> devices = {
+		createCudaDevice(NAME_NV_RTX_3080).createDevice(),
+		createOpenCLDevice(NAME_AMD_V520).createDevice(),
+	};
+
+	EXPECT_THROW(gpu::applyVisibleDeviceFilter(devices, "0,0"), std::runtime_error);
 }

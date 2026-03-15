@@ -7,6 +7,7 @@
 #include <libbase/runtime_assert.h>
 #include <libbase/timer.h>
 #include <algorithm>
+#include <cstdlib>
 
 #ifdef CUDA_SUPPORT
 #include <libgpu/cuda/enum.h>
@@ -15,6 +16,36 @@
 #endif
 
 namespace gpu {
+
+namespace {
+
+std::vector<size_t> parseVisibleDeviceIndices(const std::string &visible_devices_spec)
+{
+	std::vector<size_t> indices;
+	if (visible_devices_spec.empty()) {
+		return indices;
+	}
+
+	std::vector<std::string> parts = split(visible_devices_spec, ",");
+	std::vector<bool> seen_indices;
+	for (const std::string &raw_part: parts) {
+		std::string part = trimmed(raw_part);
+		rassert(!part.empty(), 2026031516032800001, visible_devices_spec);
+		for (char ch: part) {
+			rassert(ch >= '0' && ch <= '9', 2026031516032800002, visible_devices_spec, part);
+		}
+		size_t index = static_cast<size_t>(std::stoull(part));
+		if (seen_indices.size() <= index) {
+			seen_indices.resize(index + 1, false);
+		}
+		rassert(!seen_indices[index], 2026031516032800003, visible_devices_spec, index);
+		seen_indices[index] = true;
+		indices.push_back(index);
+	}
+	return indices;
+}
+
+}
 
 bool Device::enable_cuda = true;
 
@@ -141,6 +172,10 @@ std::vector<Device> enumDevices(bool cuda_silent, bool opencl_silent, bool vk_si
 	}
 
 	mergeApisOnDevices(devices);
+	const char *visible_devices_env = std::getenv("GPGPU_VISIBLE_DEVICES");
+	if (visible_devices_env != nullptr) {
+		devices = applyVisibleDeviceFilter(devices, visible_devices_env);
+	}
 
 //#ifdef CUDA_SUPPORT
 //	// remove OpenCL option for CUDA GPUs
@@ -163,6 +198,22 @@ std::vector<Device> enumDevices(bool cuda_silent, bool opencl_silent, bool vk_si
 	std::cout << std::endl;
 
 	return devices;
+}
+
+std::vector<Device> applyVisibleDeviceFilter(const std::vector<Device> &devices, const std::string &visible_devices_spec)
+{
+	if (visible_devices_spec.empty()) {
+		return {};
+	}
+
+	std::vector<size_t> indices = parseVisibleDeviceIndices(visible_devices_spec);
+	std::vector<Device> filtered_devices;
+	filtered_devices.reserve(indices.size());
+	for (size_t index: indices) {
+		rassert(index < devices.size(), 2026031516032800004, visible_devices_spec, index, devices.size());
+		filtered_devices.push_back(devices[index]);
+	}
+	return filtered_devices;
 }
 
 void mergeApisOnDevices(std::vector<Device> &devices)
