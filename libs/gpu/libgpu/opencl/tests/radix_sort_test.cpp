@@ -17,8 +17,10 @@ namespace {
 
 std::vector<gpu::Device> enumOpenCLDevices()
 {
+	bool prev_enable_cuda = gpu::Device::enable_cuda;
 	gpu::Device::enable_cuda = false;
 	std::vector<gpu::Device> devices = gpu::enumDevices(false, false, false);
+	gpu::Device::enable_cuda = prev_enable_cuda;
 
 	std::vector<gpu::Device> ocl_devices;
 	for (auto &device : devices) {

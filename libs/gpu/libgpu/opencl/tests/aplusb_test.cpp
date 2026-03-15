@@ -9,8 +9,10 @@
 
 std::vector<gpu::Device> enumOpenCLDevices()
 {
+	bool prev_enable_cuda = gpu::Device::enable_cuda;
 	gpu::Device::enable_cuda = false; // because otherwise enumDevices will ignore OpenCL support on NVIDIA devices
 	std::vector<gpu::Device> devices = gpu::enumDevices(false, false, false);
+	gpu::Device::enable_cuda = prev_enable_cuda;
 
 	std::vector<gpu::Device> ocl_devices;
 	for (auto &device : devices) {
