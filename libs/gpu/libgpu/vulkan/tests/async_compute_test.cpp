@@ -4,6 +4,8 @@
 #include <libbase/timer.h>
 #include <libgpu/shared_device_buffer.h>
 
+#include <cstdlib>
+
 #include "test_utils.h"
 #include "kernels/defines.h"
 #include "kernels/kernels.h"
@@ -15,6 +17,16 @@ struct WriteValueAtIndexParams {
 	int index;
 	unsigned int value;
 };
+
+bool areTimestampQueriesEnabled()
+{
+	const char *value = std::getenv("GPGPU_ENABLE_VULKAN_TIMESTAMP_QUERIES");
+	if (value == nullptr) {
+		return true;
+	}
+	std::string normalized = tolower(trimmed(value));
+	return !(normalized == "0" || normalized == "false" || normalized == "off" || normalized == "no");
+}
 
 } // namespace
 
@@ -64,7 +76,11 @@ TEST(vulkan, asyncTinyWriteValueChain)
 		std::cout << "asyncTinyWriteValueChain inflight=2 launches/sec: " << (nlaunches / elapsed_limited) << std::endl;
 		avk2::AsyncComputeStats limited_stats = context.vk()->getAsyncComputeStats(true);
 		context.vk()->logAsyncComputeStats("asyncTinyWriteValueChain/maxInflight=2", false);
-		EXPECT_GT(limited_stats.total_seconds, 0.0);
+		if (areTimestampQueriesEnabled()) {
+			EXPECT_GT(limited_stats.total_seconds, 0.0);
+		} else {
+			EXPECT_EQ(limited_stats.total_seconds, 0.0);
+		}
 
 		got0 = buffer0.readVector();
 		got1 = buffer1.readVector();

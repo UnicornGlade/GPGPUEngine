@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <numeric>
 #include <sstream>
@@ -25,6 +26,23 @@
 #endif
 
 namespace {
+	bool isEnvEnabled(const char *env_name, bool default_value)
+	{
+		const char *value = std::getenv(env_name);
+		if (value == nullptr) {
+			return default_value;
+		}
+		std::string normalized = tolower(trimmed(value));
+		if (normalized == "0" || normalized == "false" || normalized == "off" || normalized == "no") {
+			return false;
+		}
+		if (normalized == "1" || normalized == "true" || normalized == "on" || normalized == "yes") {
+			return true;
+		}
+		rassert(false, 2026031516312500001, env_name, value);
+		return default_value;
+	}
+
 	avk2::ResourceAccessKind toResourceAccessKind(avk2::DescriptorAccess access)
 	{
 		switch (access) {
@@ -637,6 +655,7 @@ avk2::VulkanEngine::VulkanEngine()
 	: pipeline_cache_capacity_per_family_(4),
 	  vk_device_id_(std::numeric_limits<uint64_t>::max()),
 	  max_inflight_compute_launches_(32),
+	  async_compute_timestamps_enabled_(true),
 	  next_async_compute_query_(0),
 	  next_compute_submit_id_(1),
 	  timestamp_period_nanos_(1.0f),
@@ -729,6 +748,7 @@ void avk2::VulkanEngine::resetAsyncComputeStats()
 
 uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
 {
+	rassert(async_compute_timestamps_enabled_, 2026031516312500002);
 	rassert(async_compute_query_pool_, 2026031517255500002);
 	rassert(next_async_compute_query_ + count <= 262144, 2026031517255500003, next_async_compute_query_, count);
 	uint32_t first_query = next_async_compute_query_;
@@ -738,6 +758,10 @@ uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
 
 void avk2::VulkanEngine::appendCompletedComputeInterval(const InflightComputeLaunch &launch)
 {
+	if (!async_compute_timestamps_enabled_) {
+		++async_compute_stats_.launches_count;
+		return;
+	}
 	uint64_t timestamps[2] = {0, 0};
 	vk::Result result = (*getDevice()).getQueryPoolResults(**async_compute_query_pool_, launch.query_start, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 	VK_CHECK_RESULT(result, 2026031517255500004);
@@ -1068,9 +1092,13 @@ void avk2::VulkanEngine::init(uint64_t vk_device_id, bool enable_validation_laye
 	bool inited_ok = device_.init(*avk2_context_->instance_context_->instance());
 	rassert(inited_ok, 629844440093078);
 	timestamp_period_nanos_ = getPhysicalDevice().getProperties().limits.timestampPeriod;
-
-	vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, 262144);
-	async_compute_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
+	async_compute_timestamps_enabled_ = isEnvEnabled("GPGPU_ENABLE_VULKAN_TIMESTAMP_QUERIES", true);
+	if (async_compute_timestamps_enabled_) {
+		vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, 262144);
+		async_compute_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
+	} else {
+		async_compute_query_pool_.reset();
+	}
 	next_async_compute_query_ = 0;
 	next_compute_submit_id_ = 1;
 	resetAsyncComputeStats();
@@ -2048,13 +2076,21 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 	context.vk()->getDevice().updateDescriptorSets(descriptor_writes, nullptr);
 
 	std::shared_ptr<vk::raii::CommandBuffer> command_buffer = std::make_shared<vk::raii::CommandBuffer>(context.vk()->createCommandBuffer());
-	uint32_t query_start = context.vk()->allocateTimestampQueries(2);
-	uint32_t query_end = query_start + 1;
+	uint32_t query_start = 0;
+	uint32_t query_end = 0;
+	if (context.vk()->async_compute_timestamps_enabled_) {
+		query_start = context.vk()->allocateTimestampQueries(2);
+		query_end = query_start + 1;
+	}
 
 	command_buffer->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
-	command_buffer->resetQueryPool(**context.vk()->async_compute_query_pool_, query_start, 2);
+	if (context.vk()->async_compute_timestamps_enabled_) {
+		command_buffer->resetQueryPool(**context.vk()->async_compute_query_pool_, query_start, 2);
+	}
 	command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, kernel->pipeline());
-	command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **context.vk()->async_compute_query_pool_, query_start);
+	if (context.vk()->async_compute_timestamps_enabled_) {
+		command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **context.vk()->async_compute_query_pool_, query_start);
+	}
 
 	std::vector<vk::DescriptorSet> descriptor_sets_non_raii = { descriptor_set };
 	std::shared_ptr<vk::raii::DescriptorSetLayout> descriptor_set_layout_rassert_raii;
@@ -2086,7 +2122,9 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 	dispatchAutoSubdivided(*command_buffer, ws);
 
-	command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, **context.vk()->async_compute_query_pool_, query_end);
+	if (context.vk()->async_compute_timestamps_enabled_) {
+		command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, **context.vk()->async_compute_query_pool_, query_end);
+	}
 	command_buffer->end();
 	last_exec_prepairing_time_ = total_t.elapsed();
 

@@ -518,6 +518,7 @@ namespace avk2 {
 		std::deque<InflightComputeLaunch> inflight_compute_launches_;
 		std::deque<std::shared_ptr<vk::raii::Fence>> available_compute_fences_;
 		std::shared_ptr<vk::raii::QueryPool> async_compute_query_pool_;
+		bool							async_compute_timestamps_enabled_;
 		uint32_t						next_async_compute_query_;
 		uint64_t						next_compute_submit_id_;
 		float							timestamp_period_nanos_;
