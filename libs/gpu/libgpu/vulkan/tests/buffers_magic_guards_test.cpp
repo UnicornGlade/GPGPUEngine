@@ -21,7 +21,7 @@ void writeAtIndex(unsigned int n, unsigned int buffer, int index)
 		unsigned int value;
 	} params = {buffer, index, 239017};
 
-	kernel.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), gpu_buffer0, gpu_buffer1);
+	kernel.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), gpu_buffer0, gpu_buffer1);
 }
 
 TEST(vulkan, bufferMagicGuards)

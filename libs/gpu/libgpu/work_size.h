@@ -3,6 +3,7 @@
 #include "utils.h"
 
 #include "../../base/libbase/math.h"
+#include "../../base/libbase/runtime_assert.h"
 
 #ifdef CUDA_SUPPORT
 	#include <vector_types.h>
@@ -56,6 +57,18 @@ namespace gpu {
 			return workDims;
 		}
 
+		size_t workSizeX() const {
+			return globalWorkSize[0];
+		}
+
+		size_t workSizeY() const {
+			return globalWorkSize[1];
+		}
+
+		size_t workSizeZ() const {
+			return globalWorkSize[2];
+		}
+
 	private:
 		void init(int workDims, size_t groupSizeX, size_t groupSizeY, size_t groupSizeZ, size_t workSizeX, size_t workSizeY, size_t workSizeZ)
 		{
@@ -107,4 +120,17 @@ namespace gpu {
 		dim3	gridSize;
 #endif
 	};
+
+	inline WorkSize WorkSize1DTo2D(size_t groupSizeX, size_t workSizeX, size_t maxGroupCountX = 65535)
+	{
+		rassert(groupSizeX > 0, 2026031519364500001);
+		rassert(maxGroupCountX > 0, 2026031519364500002);
+
+		size_t rounded_work_size_x = div_ceil(workSizeX, groupSizeX) * groupSizeX;
+		size_t required_group_count_x = rounded_work_size_x / groupSizeX;
+		size_t actual_group_count_x = std::min(required_group_count_x, maxGroupCountX);
+		size_t actual_work_size_x = actual_group_count_x * groupSizeX;
+		size_t actual_work_size_y = div_ceil(required_group_count_x, actual_group_count_x);
+		return WorkSize(groupSizeX, 1, actual_work_size_x, actual_work_size_y);
+	}
 }

@@ -20,6 +20,7 @@ avk2::Device::Device(size_t device_id_vulkan)
 	device_type			= 0;
 	vendor_id			= 0;
 	mem_size			= 0;
+	max_storage_buffer_range = 0;
 
 	pci_domain			= 0;
 	pci_bus				= 0;
@@ -59,6 +60,7 @@ bool avk2::Device::init(const vk::raii::Instance &instance, bool silent)
 		return false;
 	}
 	min_storage_buffer_offset_alignment	= prop.limits.minStorageBufferOffsetAlignment;
+	max_storage_buffer_range			= prop.limits.maxStorageBufferRange;
 	if (GPU_BUFFER_SMALL_MAGIC_GUARD_NBYTES % min_storage_buffer_offset_alignment != 0 || GPU_BUFFER_BIG_MAGIC_GUARD_NBYTES % min_storage_buffer_offset_alignment != 0) {
 		// to prevent Validation Error: [ VUID-VkWriteDescriptorSet-descriptorType-00328 ] | MessageID = 0xea08144e | vkUpdateDescriptorSets(): pDescriptorWrites[0].pBufferInfo[0].offset (4) must be a multiple of device limit minStorageBufferOffsetAlignment 16 when descriptor type is VK_DESCRIPTOR_TYPE_STORAGE_BUFFER. The Vulkan spec states: If descriptorType is VK_DESCRIPTOR_TYPE_STORAGE_BUFFER or VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, the offset member of each element of pBufferInfo must be a multiple of VkPhysicalDeviceLimits::minStorageBufferOffsetAlignment (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkWriteDescriptorSet-descriptorType-00328)
 		if (!silent) std::cout << "Vulkan device " << name << " skipped: unsupported min storage buffer offset alignment " << min_storage_buffer_offset_alignment << " (expected " << GPU_BUFFER_SMALL_MAGIC_GUARD_NBYTES << " or its divisor)" << std::endl;
@@ -413,4 +415,5 @@ void avk2::Device::printInfo()
 
 	std::cout << "  driver version: " << driver_version << std::endl;
 	std::cout << "  max work group size " << max_workgroup_size << std::endl;
+	std::cout << "  max storage buffer range " << max_storage_buffer_range << std::endl;
 }

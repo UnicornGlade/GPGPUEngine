@@ -79,7 +79,7 @@ TEST(vulkan, aplusb)
 {
 	std::vector<gpu::Device> devices = enumVKDevices();
 
-	unsigned int n = 8388608;
+	unsigned int n = 100 * 1000 * 1000;
 
 	std::vector<unsigned int> as(n, 0);
 	std::vector<unsigned int> bs(n, 0);
@@ -93,13 +93,21 @@ TEST(vulkan, aplusb)
 		std::cout << "Testing Vulkan device #" << (k + 1) << "/" << devices.size() << "..." << std::endl;
 		gpu::Context context = activateVKContext(devices[k]);
 
+		size_t buffer_nbytes = size_t(n) * sizeof(unsigned int);
+		if (buffer_nbytes > context.vk()->device().max_storage_buffer_range) {
+			std::cout << "Skipping device " << context.vk()->device().name
+					  << ": max storage buffer range " << context.vk()->device().max_storage_buffer_range
+					  << " is smaller than required " << buffer_nbytes << " bytes" << std::endl;
+			continue;
+		}
+
 		gpu::gpu_mem_32u gpu_a, gpu_b, gpu_c;
 		gpu_a.resizeN(n);
 		gpu_b.resizeN(n);
 		gpu_c.resizeN(n);
 
-		gpu_a.writeN(as.data(), n);
-		gpu_b.writeN(bs.data(), n);
+		gpu_a.writeN(as.data(), as.size());
+		gpu_b.writeN(bs.data(), bs.size());
 
 		avk2::KernelSource kernel_aplusb(avk2::getAplusBKernel());
 
@@ -107,7 +115,7 @@ TEST(vulkan, aplusb)
 		timer exec_timer;
 		for (int launch = 0; launch < 3; ++launch) {
 			exec_timer.restart();
-			gpu::WorkSize worksize(VK_GROUP_SIZE, n);
+			gpu::WorkSize worksize = gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n);
 			kernel_aplusb.exec(n, worksize, gpu_a, gpu_b, gpu_c);
 			std::cout << "VRAM bandwidth: " << (rw_data_size / exec_timer.elapsed()) / (1024 * 1024 * 1024) << " GB/s" << std::endl;
 
@@ -120,10 +128,38 @@ TEST(vulkan, aplusb)
 		std::vector<unsigned int> wrong_bs = bs;
 		wrong_bs[n / 2] += 1;
 		gpu_b.writeN(wrong_bs.data(), n);
-		gpu::WorkSize worksize(VK_GROUP_SIZE, n);
+		gpu::WorkSize worksize = gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n);
 		// we expect that GPU rassert 160682133 will fail:
 		kernel_aplusb.exec(n, worksize, gpu_a, gpu_b, gpu_c);
 		EXPECT_THROW(context.vk()->waitForAllInflightComputeLaunches(), gpu_failure);
+	}
+
+	checkPostInvariants();
+}
+
+TEST(vulkan, raw1DWorkSizeRequiresExplicit2DConversion)
+{
+	std::vector<gpu::Device> devices = enumVKDevices();
+	for (size_t k = 0; k < devices.size(); ++k) {
+		std::cout << "Testing Vulkan device #" << (k + 1) << "/" << devices.size() << "..." << std::endl;
+		gpu::Context context = activateVKContext(devices[k]);
+
+		unsigned int n = 100 * 1000 * 1000;
+		gpu::gpu_mem_32u gpu_a(1), gpu_b(1), gpu_c(1);
+		std::vector<unsigned int> as(1, 1);
+		std::vector<unsigned int> bs(1, 2);
+		gpu_a.writeN(as.data(), as.size());
+		gpu_b.writeN(bs.data(), bs.size());
+
+		avk2::KernelSource kernel_aplusb(avk2::getAplusBKernel());
+		try {
+			kernel_aplusb.exec(n, gpu::WorkSize(VK_GROUP_SIZE, n), gpu_a, gpu_b, gpu_c);
+			FAIL() << "Expected raw 1D Vulkan dispatch to be rejected";
+		} catch (const std::runtime_error &e) {
+			std::string message = e.what();
+			EXPECT_NE(message.find("WorkSize1DTo2D"), std::string::npos);
+			EXPECT_NE(message.find("workSize2DTo1D"), std::string::npos);
+		}
 	}
 
 	checkPostInvariants();
@@ -163,7 +199,7 @@ TEST(vulkan, aplusbMultiThreaded)
 				avk2::KernelSource kernel_aplusb(avk2::getAplusBKernel());
 
 				for (int launch = 0; launch < 3; ++launch) {
-					gpu::WorkSize worksize(VK_GROUP_SIZE, n);
+					gpu::WorkSize worksize = gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n);
 					kernel_aplusb.exec(n, worksize, gpu_a, gpu_b, gpu_c);
 				}
 

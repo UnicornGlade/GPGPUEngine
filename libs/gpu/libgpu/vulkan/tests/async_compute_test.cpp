@@ -50,7 +50,7 @@ TEST(vulkan, asyncTinyWriteValueChain)
 		timer timer_default;
 		for (int launch = 0; launch < nlaunches; ++launch) {
 			WriteValueAtIndexParams params{static_cast<unsigned int>(launch & 1), launch / 2, static_cast<unsigned int>(launch + 7)};
-			kernel_write_value.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), buffer0, buffer1);
+			kernel_write_value.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
 		}
 		double elapsed_default = timer_default.elapsed();
 		std::cout << "asyncTinyWriteValueChain default launches/sec: " << (nlaunches / elapsed_default) << std::endl;
@@ -70,7 +70,7 @@ TEST(vulkan, asyncTinyWriteValueChain)
 		timer timer_limited;
 		for (int launch = 0; launch < nlaunches; ++launch) {
 			WriteValueAtIndexParams params{static_cast<unsigned int>(launch & 1), launch / 2, static_cast<unsigned int>(launch + 17)};
-			kernel_write_value.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), buffer0, buffer1);
+			kernel_write_value.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
 		}
 		double elapsed_limited = timer_limited.elapsed();
 		std::cout << "asyncTinyWriteValueChain inflight=2 launches/sec: " << (nlaunches / elapsed_limited) << std::endl;
@@ -122,7 +122,7 @@ TEST(vulkan, asyncAplusbChain)
 		timer timer_chain;
 		for (int launch = 0; launch < nlaunches; ++launch) {
 			gpu::gpu_mem_32u &out = (launch & 1) ? gpu_c1 : gpu_c0;
-			kernel_aplusb.exec(n, gpu::WorkSize(VK_GROUP_SIZE, n), gpu_a, gpu_b, out);
+			kernel_aplusb.exec(n, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n), gpu_a, gpu_b, out);
 		}
 		double elapsed = timer_chain.elapsed();
 		double total_rw_gb = (3.0 * n * sizeof(unsigned int) * nlaunches) / (1024.0 * 1024.0 * 1024.0);

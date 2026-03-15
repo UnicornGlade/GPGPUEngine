@@ -55,7 +55,9 @@ void run(int argc, char** argv)
         timer t;
 
         // Настраиваем размер рабочего пространства (n) и размер рабочих групп в этом рабочем пространстве (GROUP_SIZE=256)
-        gpu::WorkSize workSize(GROUP_SIZE, n);
+        gpu::WorkSize workSize = (context.type() == gpu::Context::TypeVulkan)
+            ? gpu::WorkSize1DTo2D(GROUP_SIZE, n)
+            : gpu::WorkSize(GROUP_SIZE, n);
 
         // Запускаем кернел, с указанием размера рабочего пространства и передачей всех аргументов
         // Если хотите - можете удалить ветвление здесь и оставить только тот код который соответствует вашему выбору API

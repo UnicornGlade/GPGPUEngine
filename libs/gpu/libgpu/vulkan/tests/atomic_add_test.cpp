@@ -19,7 +19,7 @@ TEST(vulkan, atomicAdd)
 		avk2::KernelSource kernel_atomic_add(avk2::getAtomicAddKernel());
 
 		std::vector<int> setup_n_additions = {5,	10,		100000,		10000000,	10000000};
-		std::vector<int> setup_table_sizes = {10,	5,		1000000,	33554368,	1000	};
+		std::vector<int> setup_table_sizes = {10,	5,		1000000,	100000000,	1000	};
 		std::vector<int> setup_max_addings = {1024,	1024,	8,			1,			1		};
 
 		int niters = 3;
@@ -29,6 +29,14 @@ TEST(vulkan, atomicAdd)
 			int table_size = setup_table_sizes[setup];
 			int max_adding_value = setup_max_addings[setup];
 			std::cout << "setup: " << n_additions << " additions x [0 ... " << max_adding_value << "] values into table of " << table_size << " size" << std::endl;
+
+			size_t table_nbytes = size_t(table_size) * sizeof(float);
+			if (table_nbytes > context.vk()->device().max_storage_buffer_range) {
+				std::cout << "Skipping setup on device " << context.vk()->device().name
+						  << ": max storage buffer range " << context.vk()->device().max_storage_buffer_range
+						  << " is smaller than required " << table_nbytes << " bytes" << std::endl;
+				continue;
+			}
 
 			int max_float_precise_int = (1 << std::numeric_limits<float>::digits) - 1;
 			rassert(n_additions * max_adding_value <= max_float_precise_int, 215254685);
@@ -59,7 +67,7 @@ TEST(vulkan, atomicAdd)
 				table_values_gpu.fill(0);
 
 				timer timer; timer.start();
-				kernel_atomic_add.exec(std::pair(n_additions, table_size), gpu::WorkSize(VK_GROUP_SIZE, n_additions),
+				kernel_atomic_add.exec(std::pair(n_additions, table_size), gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n_additions),
 									   indicies_to_add_gpu, values_to_add_gpu, table_values_gpu);
 				iter_times.push_back(timer.elapsed());
 

@@ -51,6 +51,7 @@ namespace avk2 {
 		unsigned int								max_workgroup_size;
 
 		unsigned int								min_storage_buffer_offset_alignment;
+		unsigned int								max_storage_buffer_range;
 		unsigned int								max_fragment_output_attachments;
 		unsigned int								max_image_array_layers;
 		unsigned int								max_image_dimension_2d;

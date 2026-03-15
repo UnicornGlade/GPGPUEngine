@@ -55,7 +55,7 @@ TEST(vulkan, binarySearch)
 			std::vector<double> iter_times;
 			for (int iter = 0; iter < niters; ++iter) {
 				timer timer; timer.start();
-				kernel_batched_binary_search.exec(std::pair(n_searches, n_values), gpu::WorkSize(VK_GROUP_SIZE, n_searches),
+				kernel_batched_binary_search.exec(std::pair(n_searches, n_values), gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n_searches),
 												  values_to_find_gpu, sorted_values_gpu, result_indices_gpu);
 				iter_times.push_back(timer.elapsed());
 

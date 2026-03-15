@@ -34,13 +34,13 @@ void launchWriteValueKernel(gpu::gpu_mem_32u &buffer0, gpu::gpu_mem_32u &buffer1
 		int index;
 		unsigned int value;
 	} params = {chosen_buffer, index, value};
-	kernel.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), buffer0, buffer1);
+	kernel.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
 }
 
 void launchCopyKernel(gpu::gpu_mem_32u &buffer_dst, gpu::gpu_mem_32u &buffer_src, unsigned int n)
 {
 	avk2::KernelSource kernel(avk2::getFillBufferWithZerosKernel());
-	kernel.exec(n, gpu::WorkSize(VK_GROUP_SIZE, n), buffer_dst, buffer_src);
+	kernel.exec(n, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, n), buffer_dst, buffer_src);
 }
 
 void createRectangleGeometry(gpu::gpu_mem_vertices_xyz &gpu_vertices, gpu::gpu_mem_32u &gpu_faces)
@@ -259,7 +259,7 @@ TEST(vulkan, computePipelineCacheStressShowsSignificantSpeedup)
 				int index;
 				unsigned int value;
 			} params = {0u, 0, narrow_cast<unsigned int>(iter + 1)};
-			kernel.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), buffer0, buffer1);
+			kernel.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
 			uncached_preparing_times.push_back(kernel.getLastExecPrepairingTime());
 		}
 
@@ -272,7 +272,7 @@ TEST(vulkan, computePipelineCacheStressShowsSignificantSpeedup)
 				int index;
 				unsigned int value;
 			} params = {1u, 0, narrow_cast<unsigned int>(100 + iter)};
-			kernel.exec(params, gpu::WorkSize(VK_GROUP_SIZE, 1), buffer0, buffer1);
+			kernel.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
 			cached_preparing_times.push_back(kernel.getLastExecPrepairingTime());
 		}
 

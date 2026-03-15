@@ -2372,6 +2372,13 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 	const PushConstant &push_constant = params;
 	rassert(!push_constant.isEmpty(), 990402328745136); // this is not a strict requirement, but in all cases currently we use push constants, so let's ensure this
 
+	if (ws.clWorkDim() == 1) {
+		rassert(false,
+				"Vulkan raw 1D dispatch via gpu::WorkSize(groupSizeX, workSizeX) is not supported. "
+				"Use gpu::WorkSize1DTo2D(" + to_string(ws.vkGroupSize()[0]) + ", " + to_string(ws.workSizeX()) + ") on host side and workSize2DTo1D(gl_GlobalInvocationID) in the kernel instead.",
+				2026031519364500003);
+	}
+
 	std::vector<vk::DescriptorType> descriptor_types = kernel->getDescriptorTypes();
 	const std::vector<DescriptorAccess> &descriptor_accesses = kernel->getDescriptorAccesses();
 	vk::raii::DescriptorSet descriptor_set = context.vk()->allocateDescriptor(kernel->descriptorSetLayout(), descriptor_types);

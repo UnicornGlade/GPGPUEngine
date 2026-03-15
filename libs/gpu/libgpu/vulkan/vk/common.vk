@@ -10,9 +10,9 @@
 #define VK_MAX_FRAGMENT_OUTPUT_ATTACHMENTS_USED		(VK_MAX_NCHANNELS + 1) // required in texturing shader that enblends VK_MAX_NCHANNELS+1=(camera image)+(camera weight) outputs into atlas
 #define VK_MAX_IMAGE_ARRAY_LAYERS_USED				20 // required in texturing shader that aggregates 20 best similarities from all neighbors
 
-#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_X			32768 // thanks to automatic subdivision - we can run even large compute workloads on GPU with any workgroup count limit
-#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_Y			16384
-#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_Z			16384
+#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_X			65535
+#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_Y			65535
+#define VK_MAX_COMPUTE_WORK_GROUP_COUNT_Z			65535
 
 #define VK_SUBGROUP_SIZE                                        32
 
@@ -54,6 +54,7 @@ int div_ceil(int num, int denom) {
 uint div_ceil(uint num, uint denom) {
 	return (num + denom - 1) / denom;
 }
+#define workSize2DTo1D(global_id) ((global_id).y * gl_NumWorkGroups.x * gl_WorkGroupSize.x + (global_id).x)
 
 vec2 toGLPositionRange(vec2 px) // px is in [0, 1] range
 {

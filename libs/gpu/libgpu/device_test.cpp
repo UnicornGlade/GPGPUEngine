@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "device.h"
+#include "work_size.h"
 
 #include <libbase/gtest_utils.h>
 #include <stdexcept>
@@ -230,4 +231,17 @@ TEST(gpu_device, applyVisibleDeviceFilterRejectsDuplicateIndices)
 	};
 
 	EXPECT_THROW(gpu::applyVisibleDeviceFilter(devices, "0,0"), std::runtime_error);
+}
+
+TEST(gpu_device, workSize1DTo2DKeepsXWithinLimit)
+{
+	size_t n = 100ull * 1000ull * 1000ull;
+	gpu::WorkSize ws = gpu::WorkSize1DTo2D(256, n);
+
+	EXPECT_EQ(ws.clWorkDim(), 2);
+	EXPECT_EQ(ws.vkGroupSize()[0], 256u);
+	EXPECT_EQ(ws.vkGroupSize()[1], 1u);
+	EXPECT_LE(ws.vkGroupCount()[0], 65535u);
+	EXPECT_GE(ws.workSizeX() * ws.workSizeY(), n);
+	EXPECT_EQ(ws.workSizeZ(), 1u);
 }

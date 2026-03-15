@@ -18,7 +18,7 @@ shared uint prefix[BINS_CNT];
 layout (local_size_x = VK_GROUP_SIZE) in;
 void main()
 {
-	const uint global_ind = gl_GlobalInvocationID.x;
+	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
 	const uint thread_ind = global_ind & 31u;
 
 	if (global_ind < params.buf2_sz) {

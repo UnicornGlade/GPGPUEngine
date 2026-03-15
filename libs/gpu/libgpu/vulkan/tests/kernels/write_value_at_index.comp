@@ -22,7 +22,7 @@ layout (push_constant) uniform PushConstants {
 
 void main()
 {
-	if (gl_GlobalInvocationID.x == 0) {
+	if (workSize2DTo1D(gl_GlobalInvocationID) == 0) {
 		rassert(params.chosenBuffer < 2, 859856150);
 		if (params.chosenBuffer == 0) {
 			buffer0[params.index] = params.value;

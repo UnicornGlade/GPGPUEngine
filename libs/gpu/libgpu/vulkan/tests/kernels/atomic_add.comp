@@ -42,7 +42,7 @@ layout (push_constant) uniform PushConstants {
 layout (local_size_x = VK_GROUP_SIZE) in;
 void main()
 {
-	const int i = int(gl_GlobalInvocationID.x);
+	const int i = int(workSize2DTo1D(gl_GlobalInvocationID));
 	if (i >= params.n) {
 		return;
 	}

@@ -168,6 +168,18 @@ void main()
 }
 ```
 
+Для Vulkan raw 1D launch через `gpu::WorkSize(groupSizeX, workSizeX)` запрещён. Нужно сразу явно перейти на 2D launch:
+
+```c++
+gpu::WorkSize ws = gpu::WorkSize1DTo2D(256, n);
+```
+
+И в kernel вместо `gl_GlobalInvocationID.x` использовать:
+
+```glsl
+const uint i = workSize2DTo1D(gl_GlobalInvocationID);
+```
+
 If we will compile this kernel into SPIRV and then launch SPIRV-Reflect:
 
 ```/opt/bin/spirv-reflect .../source/libgpu/vulkan/tests/kernels/generated_kernels/aplusb_spirv_vulkan.spir```
