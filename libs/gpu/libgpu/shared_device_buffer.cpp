@@ -137,6 +137,9 @@ void shared_device_buffer::decref()
 		case Context::TypeVulkan:
 		{
 			avk2::raii::BufferData* vk_data = (avk2::raii::BufferData *) data_;
+			if (context.type() == Context::TypeVulkan) {
+				context.vk()->waitForBuffer(*vk_data);
+			}
 			delete vk_data;
 			break;
 		}

@@ -138,6 +138,9 @@ void shared_device_image::decref()
 			OCL_SAFE_CALL(clReleaseMemObject((cl_mem) data_));
 			break;
 		case Context::TypeVulkan:
+			if (Context context; context.type() == Context::TypeVulkan) {
+				context.vk()->waitForImage(*vkImageData());
+			}
 			delete vkImageData();
 			break;
 		default:

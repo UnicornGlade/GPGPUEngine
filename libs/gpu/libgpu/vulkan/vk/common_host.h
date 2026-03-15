@@ -5,7 +5,7 @@
 
 #define VK_VERTICES_BINDING					0
 
-#define VK_MAX_DESCRIPTORS_PER_TYPE			32 // increase if got Device::allocateDescriptorSets: ErrorOutOfPoolMemory
+#define VK_MAX_DESCRIPTORS_PER_TYPE			8192 // async compute keeps many descriptor sets alive concurrently
 #define VK_POOL_DESCRIPTOR_TYPES			{vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageImage, vk::DescriptorType::eSampledImage, vk::DescriptorType::eCombinedImageSampler}
 
 #define VK_GPU_MIN_VRAM_REQUIRED			(400*1024*1024) // i.e. we ignore devices with VRAM<400 MB, in fact the main motivation is to filter out integrated APU with 256 MB like described in ticket #5124

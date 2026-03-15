@@ -14,6 +14,7 @@ namespace vk {
 }
 
 namespace avk2 {
+	enum class DescriptorAccess;
 
 	class SpvReflectShaderModuleRAII;
 
@@ -37,6 +38,7 @@ namespace avk2 {
 		size_t													getPushConstantSize() const;
 		std::set<unsigned int>									getDescriptorsSets() const;
 		std::vector<std::optional<vk::DescriptorType>>			getDescriptorsTypes(unsigned int set) const;
+		std::vector<std::optional<DescriptorAccess>>			getDescriptorsAccesses(unsigned int set) const;
 		bool													isDescriptorUsed(unsigned int set, unsigned int binding) const;
 		bool													isImageArrayed(unsigned int set, unsigned int binding) const;
 		SpvReflectBlockVariable									getBindingStructInfo(unsigned int set, unsigned int binding) const;
@@ -47,6 +49,9 @@ namespace avk2 {
 		static std::vector<std::optional<vk::DescriptorType>>	mergeDescriptorsTypes(const std::vector<std::vector<std::optional<vk::DescriptorType>>> &sets);
 		static std::vector<vk::DescriptorType>					getMergedDescriptorsTypes(const std::vector<ShaderModuleInfo> &shaders_module_info, unsigned int set);
 		static std::vector<vk::DescriptorType>					ensureNoEmptyDescriptorTypes(const std::vector<std::optional<vk::DescriptorType>> &descriptor_types);
+		static std::vector<std::optional<DescriptorAccess>>		mergeDescriptorsAccesses(const std::vector<std::vector<std::optional<DescriptorAccess>>> &sets);
+		static std::vector<DescriptorAccess>					getMergedDescriptorsAccesses(const std::vector<ShaderModuleInfo> &shaders_module_info, unsigned int set);
+		static std::vector<DescriptorAccess>					ensureNoEmptyDescriptorAccesses(const std::vector<std::optional<DescriptorAccess>> &descriptor_accesses);
 		static bool												isDescriptorUsedInAny(const std::vector<ShaderModuleInfo> &shaders_module_info, unsigned int set, unsigned int binding);
 
 	protected:

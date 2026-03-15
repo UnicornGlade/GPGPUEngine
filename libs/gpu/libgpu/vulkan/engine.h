@@ -12,6 +12,9 @@
 #include <map>
 #include <vector>
 #include <memory>
+#include <array>
+#include <deque>
+#include <optional>
 #include <string.h>
 #include <unordered_map>
 
@@ -45,6 +48,7 @@ namespace vk {
 		class PipelineLayout; // TODO ???
 		class Pipeline; // Bakes a lot of state, but viewport/stencil masks/blend constants/etc. can be changed dynamically
 		class RenderPass;
+		class QueryPool;
 
 //		class DescriptorPool; // Used to allocate descriptors
 
@@ -87,6 +91,33 @@ namespace avk2 {
 	vk::ApplicationInfo					createAppInfo();
 	vk::raii::Instance					createInstance(const vk::raii::Context &context, bool enable_validation_layers=false);
 	bool								isMoltenVK();
+
+	enum class DescriptorAccess {
+		ReadOnly,
+		WriteOnly,
+		ReadWrite,
+		Unknown,
+	};
+
+	enum class ResourceAccessKind {
+		Read,
+		Write,
+		ReadWrite,
+	};
+
+	struct AsyncComputeStats {
+		double total_seconds = 0.0;
+		double busy_seconds = 0.0;
+		double idle_seconds = 0.0;
+		double busy_percent = 0.0;
+		double idle_percent = 0.0;
+		double median_gap_seconds = 0.0;
+		double max_gap_seconds = 0.0;
+		size_t launches_count = 0;
+		size_t gaps_count = 0;
+		size_t waits_due_to_limit = 0;
+		double wait_due_to_limit_seconds = 0.0;
+	};
 
 	class InstanceContext {
 	public:
@@ -288,14 +319,17 @@ namespace avk2 {
 		typedef VulkanKernelArg Arg;
 
 		vk::raii::DescriptorSetLayout&			descriptorSetLayout()			{ return *descriptor_set_layout_.get();            }
+		vk::raii::DescriptorSetLayout&			descriptorSetLayoutRassert()	{ return *descriptor_set_layout_rassert_.get();    }
 		vk::raii::PipelineLayout&				pipelineLayout()				{ return *pipeline_layout_.get();                  }
 		vk::raii::Pipeline&						pipeline()						{ return *pipeline_.get();                         }
 		const avk2::ShaderModuleInfo&			shaderModuleInfo()				{ return *shader_module_info_.get();               }
 
-		gpu::gpu_mem_32u&						rassertCodeAndLineBuffer()		{ return rassert_code_and_line_;                   }
+		gpu::gpu_mem_32u&						rassertCodeAndLineBuffer(size_t slot)	{ return rassert_code_and_line_.at(slot);          }
 		bool									isRassertUsed()					{ return is_rassert_used_;                         }
-		void									checkRassertCode();
+		void									resetRassertCode(size_t slot);
+		void									checkRassertCode(size_t slot);
 		const std::vector<vk::DescriptorType>	&getDescriptorTypes()			{ return descriptor_types_;                        }
+		const std::vector<DescriptorAccess>		&getDescriptorAccesses()		{ return descriptor_accesses_;                     }
 		bool									isImageArrayed(unsigned int set, unsigned int binding);
 
 	protected:
@@ -307,8 +341,9 @@ namespace avk2 {
 
 		std::string									program_name_;
 		bool										is_rassert_used_;
-		gpu::gpu_mem_32u							rassert_code_and_line_;
+		std::array<gpu::gpu_mem_32u, 2>				rassert_code_and_line_;
 		std::vector<vk::DescriptorType>				descriptor_types_;
+		std::vector<DescriptorAccess>				descriptor_accesses_;
 	};
 
 	struct PipelineCacheStats {
@@ -385,6 +420,14 @@ namespace avk2 {
 		size_t							cachedPipelinesCount() const;
 		void							logComputePipelineCacheContents() const;
 		void							logRasterPipelineCacheContents() const;
+		void							setMaxInflightComputeLaunches(size_t max_inflight);
+		size_t							maxInflightComputeLaunches() const { return max_inflight_compute_launches_; }
+		void							resetAsyncComputeStats();
+		AsyncComputeStats				getAsyncComputeStats(bool wait_for_all=true);
+		void							logAsyncComputeStats(const std::string &label="", bool wait_for_all=true);
+		void							waitForAllInflightComputeLaunches();
+		void							waitForBuffer(const avk2::raii::BufferData &buffer);
+		void							waitForImage(const avk2::raii::ImageData &image);
 
 		std::unordered_map<std::string, std::shared_ptr<vk::raii::Fence>>	fences_;
 
@@ -406,10 +449,44 @@ namespace avk2 {
 		vk::raii::DescriptorSet					allocateDescriptor(vk::raii::DescriptorSetLayout& descriptor_set_layout, const std::vector<vk::DescriptorType> &descriptor_types);
 
 	protected:
+		struct ResourceAccessRecord {
+			const void *resource = nullptr;
+			ResourceAccessKind access = ResourceAccessKind::ReadWrite;
+		};
+
+		struct CompletedComputeInterval {
+			uint64_t start_ticks = 0;
+			uint64_t end_ticks = 0;
+		};
+
+		struct InflightComputeLaunch {
+			std::shared_ptr<VulkanKernel> kernel;
+			std::shared_ptr<vk::raii::CommandBuffer> command_buffer;
+			std::shared_ptr<vk::raii::Fence> fence;
+			std::shared_ptr<vk::raii::DescriptorSet> descriptor_set;
+			std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
+			std::shared_ptr<vk::raii::DescriptorSetLayout> rassert_descriptor_set_layout;
+			std::vector<gpu::shared_device_buffer> buffers_keepalive;
+			std::vector<gpu::shared_device_image> images_keepalive;
+			std::vector<ResourceAccessRecord> resource_accesses;
+			uint32_t query_start = 0;
+			uint32_t query_end = 0;
+			int rassert_slot = -1;
+			uint64_t submit_id = 0;
+		};
+
 		avk2::raii::ImageData*			createImage2D(unsigned int width, unsigned int height, vk::Format format);
 		avk2::raii::ImageData*			createImage2DArray(unsigned int width, unsigned int height, size_t cn, vk::Format format);
 		std::shared_ptr<VulkanKernel>	getOrCreateComputeKernel(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanKernel>()> &create_fn);
 		std::shared_ptr<VulkanRasterPipeline> getOrCreateRasterPipeline(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanRasterPipeline>()> &create_fn);
+		void							retireCompletedInflightComputeLaunches();
+		void							waitForInflightComputeLaunch(InflightComputeLaunch &launch);
+		void							eraseInflightComputeLaunch(uint64_t submit_id);
+		bool							doResourceAccessesConflict(const std::vector<ResourceAccessRecord> &lhs, const std::vector<ResourceAccessRecord> &rhs) const;
+		void							waitForConflictingInflightLaunches(const std::vector<ResourceAccessRecord> &resource_accesses);
+		uint32_t						allocateTimestampQueries(uint32_t count);
+		void							appendCompletedComputeInterval(const InflightComputeLaunch &launch);
+		int								acquireRassertSlot(const std::shared_ptr<VulkanKernel> &kernel);
 
 		void							allocateStagingWriteBuffers();
 		void							allocateStagingReadBuffers();
@@ -424,6 +501,7 @@ namespace avk2 {
 		// note that in such case it will be benefitial to use thread-local staging buffers
 		Mutex										staging_read_buffers_mutex_;
 		Mutex										staging_write_buffers_mutex_;
+		Mutex										inflight_compute_launches_mutex_;
 
 		using ComputeFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanKernel>>;
 		using RasterFamilyCache = libbase::LruCache<std::string, std::shared_ptr<VulkanRasterPipeline>>;
@@ -434,6 +512,14 @@ namespace avk2 {
 		std::unordered_map<std::string, RasterFamilyCache> raster_pipeline_caches_;
 
 		uint64_t						vk_device_id_;
+		size_t							max_inflight_compute_launches_;
+		std::deque<InflightComputeLaunch> inflight_compute_launches_;
+		std::shared_ptr<vk::raii::QueryPool> async_compute_query_pool_;
+		uint32_t						next_async_compute_query_;
+		uint64_t						next_compute_submit_id_;
+		float							timestamp_period_nanos_;
+		AsyncComputeStats				async_compute_stats_;
+		std::vector<CompletedComputeInterval> completed_compute_intervals_;
 
 		Device							device_;
 	};

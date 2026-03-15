@@ -5,6 +5,7 @@
 
 #include "spirv_reflect.h"
 
+#include "../engine.h"
 #include "../vulkan_api_headers.h"
 
 namespace avk2 {
@@ -27,6 +28,39 @@ namespace avk2 {
 	private:
 		SpvReflectShaderModule module;
 	};
+
+	namespace {
+		DescriptorAccess getDescriptorAccess(const SpvReflectDescriptorBinding &binding)
+		{
+			bool is_non_writable = (binding.decoration_flags & SPV_REFLECT_DECORATION_NON_WRITABLE) != 0;
+			bool is_non_readable = (binding.decoration_flags & SPV_REFLECT_DECORATION_NON_READABLE) != 0;
+
+			if (binding.resource_type == SPV_REFLECT_RESOURCE_FLAG_SRV) {
+				return DescriptorAccess::ReadOnly;
+			}
+			if (binding.resource_type == SPV_REFLECT_RESOURCE_FLAG_UAV) {
+				if (is_non_writable && !is_non_readable) {
+					return DescriptorAccess::ReadOnly;
+				}
+				if (!is_non_writable && is_non_readable) {
+					return DescriptorAccess::WriteOnly;
+				}
+				if (!is_non_writable && !is_non_readable) {
+					return DescriptorAccess::ReadWrite;
+				}
+			}
+			if (is_non_writable && !is_non_readable) {
+				return DescriptorAccess::ReadOnly;
+			}
+			if (!is_non_writable && is_non_readable) {
+				return DescriptorAccess::WriteOnly;
+			}
+			if (!is_non_writable && !is_non_readable) {
+				return DescriptorAccess::ReadWrite;
+			}
+			return DescriptorAccess::Unknown;
+		}
+	}
 }
 
 avk2::ShaderModuleInfo::ShaderModuleInfo(const std::string &program_data, const std::string &name) {
@@ -159,6 +193,33 @@ std::vector<std::optional<vk::DescriptorType>> avk2::ShaderModuleInfo::getDescri
 	return descriptor_types;
 }
 
+std::vector<std::optional<avk2::DescriptorAccess>> avk2::ShaderModuleInfo::getDescriptorsAccesses(unsigned int set) const
+{
+	uint32_t bindings_count = 0;
+	rassert(spvReflectEnumerateDescriptorBindings(shader_module_->get(), &bindings_count, nullptr) == SPV_REFLECT_RESULT_SUCCESS, 2026031517112900001);
+	std::vector<SpvReflectDescriptorBinding*> descriptor_bindings(bindings_count);
+	rassert(spvReflectEnumerateDescriptorBindings(shader_module_->get(), &bindings_count, descriptor_bindings.data()) == SPV_REFLECT_RESULT_SUCCESS, 2026031517112900002);
+
+	size_t set_size = 0;
+	for (size_t i = 0; i < bindings_count; ++i) {
+		if (descriptor_bindings[i]->set == set) {
+			set_size = std::max(set_size, static_cast<size_t>(descriptor_bindings[i]->binding + 1));
+		}
+	}
+
+	std::vector<std::optional<DescriptorAccess>> descriptor_accesses(set_size, std::nullopt);
+	for (size_t i = 0; i < bindings_count; ++i) {
+		if (descriptor_bindings[i]->set != set) {
+			continue;
+		}
+
+		unsigned int binding = descriptor_bindings[i]->binding;
+		rassert(binding < set_size, 2026031517112900003);
+		descriptor_accesses[binding] = getDescriptorAccess(*descriptor_bindings[i]);
+	}
+	return descriptor_accesses;
+}
+
 std::vector<std::optional<vk::DescriptorType>> avk2::ShaderModuleInfo::mergeDescriptorsTypes(const std::vector<std::vector<std::optional<vk::DescriptorType>>> &sets)
 {
 	size_t set_size = 0;
@@ -205,6 +266,66 @@ std::vector<vk::DescriptorType> avk2::ShaderModuleInfo::ensureNoEmptyDescriptorT
 		unpacked_descriptor_types[i] = *descriptor_types[i];
 	}
 	return unpacked_descriptor_types;
+}
+
+std::vector<std::optional<avk2::DescriptorAccess>> avk2::ShaderModuleInfo::mergeDescriptorsAccesses(const std::vector<std::vector<std::optional<DescriptorAccess>>> &sets)
+{
+	size_t set_size = 0;
+	for (size_t k = 0; k < sets.size(); ++k) {
+		set_size = std::max(sets[k].size(), set_size);
+	}
+	std::vector<std::optional<DescriptorAccess>> descriptor_accesses(set_size, std::nullopt);
+	for (size_t k = 0; k < sets.size(); ++k) {
+		if (sets[k].empty()) {
+			continue;
+		}
+		for (size_t binding = 0; binding < set_size; ++binding) {
+			if (binding >= sets[k].size() || !sets[k][binding].has_value()) {
+				continue;
+			}
+			if (!descriptor_accesses[binding].has_value()) {
+				descriptor_accesses[binding] = sets[k][binding];
+				continue;
+			}
+
+			DescriptorAccess merged_access = *descriptor_accesses[binding];
+			DescriptorAccess new_access = *sets[k][binding];
+			if (merged_access == new_access) {
+				continue;
+			}
+			if (merged_access == DescriptorAccess::Unknown || new_access == DescriptorAccess::Unknown) {
+				descriptor_accesses[binding] = DescriptorAccess::Unknown;
+			} else if ((merged_access == DescriptorAccess::ReadOnly && new_access == DescriptorAccess::WriteOnly)
+					|| (merged_access == DescriptorAccess::WriteOnly && new_access == DescriptorAccess::ReadOnly)
+					|| merged_access == DescriptorAccess::ReadWrite
+					|| new_access == DescriptorAccess::ReadWrite) {
+				descriptor_accesses[binding] = DescriptorAccess::ReadWrite;
+			} else {
+				rassert(false, 2026031517112900004);
+			}
+		}
+	}
+	return descriptor_accesses;
+}
+
+std::vector<avk2::DescriptorAccess> avk2::ShaderModuleInfo::getMergedDescriptorsAccesses(const std::vector<ShaderModuleInfo> &shaders_module_info, unsigned int set)
+{
+	rassert(shaders_module_info.size() >= 1, 2026031517112900005);
+	std::vector<std::vector<std::optional<DescriptorAccess>>> sets(shaders_module_info.size());
+	for (size_t k = 0; k < shaders_module_info.size(); ++k) {
+		sets[k] = shaders_module_info[k].getDescriptorsAccesses(set);
+	}
+	return ensureNoEmptyDescriptorAccesses(mergeDescriptorsAccesses(sets));
+}
+
+std::vector<avk2::DescriptorAccess> avk2::ShaderModuleInfo::ensureNoEmptyDescriptorAccesses(const std::vector<std::optional<DescriptorAccess>> &descriptor_accesses)
+{
+	std::vector<DescriptorAccess> unpacked(descriptor_accesses.size());
+	for (size_t i = 0; i < descriptor_accesses.size(); ++i) {
+		rassert(descriptor_accesses[i].has_value(), 2026031517112900006);
+		unpacked[i] = *descriptor_accesses[i];
+	}
+	return unpacked;
 }
 
 bool avk2::ShaderModuleInfo::isDescriptorUsed(unsigned int set, unsigned int binding) const

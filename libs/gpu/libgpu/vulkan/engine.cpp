@@ -12,7 +12,9 @@
 #include "data_image.h"
 
 #include <atomic>
+#include <algorithm>
 #include <filesystem>
+#include <numeric>
 #include <sstream>
 
 #include "vk/common_host.h"
@@ -23,6 +25,23 @@
 #endif
 
 namespace {
+	avk2::ResourceAccessKind toResourceAccessKind(avk2::DescriptorAccess access)
+	{
+		switch (access) {
+		case avk2::DescriptorAccess::ReadOnly:	return avk2::ResourceAccessKind::Read;
+		case avk2::DescriptorAccess::WriteOnly:	return avk2::ResourceAccessKind::Write;
+		case avk2::DescriptorAccess::ReadWrite:	return avk2::ResourceAccessKind::ReadWrite;
+		case avk2::DescriptorAccess::Unknown:	return avk2::ResourceAccessKind::ReadWrite;
+		}
+		rassert(false, 2026031517192800001);
+		return avk2::ResourceAccessKind::ReadWrite;
+	}
+
+	double ticksToSeconds(uint64_t ticks, float timestamp_period_nanos)
+	{
+		return static_cast<double>(ticks) * static_cast<double>(timestamp_period_nanos) * 1e-9;
+	}
+
 	// see https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Validation_layers
 	// this is a debug callback for Vulkan Validation Layers
 	// when they find any problems - this callback will be triggered
@@ -458,7 +477,7 @@ public:
 		for (vk::DescriptorType type: VK_POOL_DESCRIPTOR_TYPES) {
 			pool_size_per_type.push_back(vk::DescriptorPoolSize(type, VK_MAX_DESCRIPTORS_PER_TYPE));
 		}
-		unsigned int max_descriptor_sets = 2; // because we have special descriptor set for rassert - see VK_RASSERT_CODE_SET usage
+		unsigned int max_descriptor_sets = 8192; // async compute keeps descriptor sets alive while launches are inflight
 		vk::DescriptorPoolCreateInfo descriptor_pool_create_info(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet, max_descriptor_sets, pool_size_per_type);
 		descriptor_pool_ = std::make_shared<vk::raii::DescriptorPool>(device_->createDescriptorPool(descriptor_pool_create_info));
 	}
@@ -596,11 +615,16 @@ vk::raii::DescriptorPool &avk2::VulkanEngine::getDescriptorPool()
 avk2::VulkanEngine::VulkanEngine()
 	: pipeline_cache_capacity_per_family_(4),
 	  vk_device_id_(std::numeric_limits<uint64_t>::max()),
+	  max_inflight_compute_launches_(32),
+	  next_async_compute_query_(0),
+	  next_compute_submit_id_(1),
+	  timestamp_period_nanos_(1.0f),
 	  device_(vk_device_id_)
 {}
 
 avk2::VulkanEngine::~VulkanEngine()
 {
+	waitForAllInflightComputeLaunches();
 	if (cachedPipelinesCount() != 0) {
 		std::cerr << "VulkanEngine: uncleared cached pipelines found" << std::endl;
 	}
@@ -668,6 +692,307 @@ void avk2::VulkanEngine::logRasterPipelineCacheContents() const
 	logCachedPipelines(raster_pipeline_caches_, "raster pipeline cache");
 }
 
+void avk2::VulkanEngine::setMaxInflightComputeLaunches(size_t max_inflight)
+{
+	rassert(max_inflight > 0, 2026031517255500001);
+	max_inflight_compute_launches_ = max_inflight;
+}
+
+void avk2::VulkanEngine::resetAsyncComputeStats()
+{
+	waitForAllInflightComputeLaunches();
+	async_compute_stats_ = {};
+	completed_compute_intervals_.clear();
+	next_async_compute_query_ = 0;
+}
+
+uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
+{
+	rassert(async_compute_query_pool_, 2026031517255500002);
+	rassert(next_async_compute_query_ + count <= 262144, 2026031517255500003, next_async_compute_query_, count);
+	uint32_t first_query = next_async_compute_query_;
+	next_async_compute_query_ += count;
+	return first_query;
+}
+
+void avk2::VulkanEngine::appendCompletedComputeInterval(const InflightComputeLaunch &launch)
+{
+	uint64_t timestamps[2] = {0, 0};
+	vk::Result result = (*getDevice()).getQueryPoolResults(**async_compute_query_pool_, launch.query_start, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
+	VK_CHECK_RESULT(result, 2026031517255500004);
+
+	if (timestamps[0] <= timestamps[1]) {
+		completed_compute_intervals_.push_back({timestamps[0], timestamps[1]});
+	}
+	++async_compute_stats_.launches_count;
+}
+
+void avk2::VulkanEngine::waitForInflightComputeLaunch(InflightComputeLaunch &launch)
+{
+	VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(*launch.fence), true, VULKAN_TIMEOUT_NANOSECS), 2026031517255500005);
+	appendCompletedComputeInterval(launch);
+	if (launch.kernel && launch.rassert_slot >= 0) {
+		launch.kernel->checkRassertCode(static_cast<size_t>(launch.rassert_slot));
+	}
+}
+
+void avk2::VulkanEngine::eraseInflightComputeLaunch(uint64_t submit_id)
+{
+	std::optional<InflightComputeLaunch> removed_launch;
+	{
+		Lock lock(inflight_compute_launches_mutex_);
+		for (auto it = inflight_compute_launches_.begin(); it != inflight_compute_launches_.end(); ++it) {
+			if (it->submit_id == submit_id) {
+				removed_launch = std::move(*it);
+				inflight_compute_launches_.erase(it);
+				break;
+			}
+		}
+	}
+}
+
+void avk2::VulkanEngine::retireCompletedInflightComputeLaunches()
+{
+	for (;;) {
+		std::optional<InflightComputeLaunch> ready_launch;
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			for (const InflightComputeLaunch &launch : inflight_compute_launches_) {
+				vk::Result fence_status = (*getDevice()).getFenceStatus(vk::Fence(*launch.fence));
+				if (fence_status == vk::Result::eSuccess) {
+					ready_launch = launch;
+					break;
+				}
+			}
+		}
+		if (!ready_launch.has_value()) {
+			return;
+		}
+		try {
+			waitForInflightComputeLaunch(*ready_launch);
+		} catch (...) {
+			eraseInflightComputeLaunch(ready_launch->submit_id);
+			throw;
+		}
+		eraseInflightComputeLaunch(ready_launch->submit_id);
+	}
+}
+
+bool avk2::VulkanEngine::doResourceAccessesConflict(const std::vector<ResourceAccessRecord> &lhs, const std::vector<ResourceAccessRecord> &rhs) const
+{
+	for (const ResourceAccessRecord &left : lhs) {
+		for (const ResourceAccessRecord &right : rhs) {
+			if (left.resource != right.resource) {
+				continue;
+			}
+			bool left_reads = left.access == ResourceAccessKind::Read || left.access == ResourceAccessKind::ReadWrite;
+			bool left_writes = left.access == ResourceAccessKind::Write || left.access == ResourceAccessKind::ReadWrite;
+			bool right_reads = right.access == ResourceAccessKind::Read || right.access == ResourceAccessKind::ReadWrite;
+			bool right_writes = right.access == ResourceAccessKind::Write || right.access == ResourceAccessKind::ReadWrite;
+			if (left_writes || right_writes || (left_reads && right_reads)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void avk2::VulkanEngine::waitForConflictingInflightLaunches(const std::vector<ResourceAccessRecord> &resource_accesses)
+{
+	for (;;) {
+		retireCompletedInflightComputeLaunches();
+
+		std::optional<size_t> conflicting_index;
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			for (size_t i = 0; i < inflight_compute_launches_.size(); ++i) {
+				if (doResourceAccessesConflict(resource_accesses, inflight_compute_launches_[i].resource_accesses)) {
+					conflicting_index = i;
+					break;
+				}
+			}
+		}
+
+		if (!conflicting_index.has_value()) {
+			return;
+		}
+
+		InflightComputeLaunch launch;
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			launch = inflight_compute_launches_[*conflicting_index];
+		}
+		timer wait_timer;
+		try {
+			waitForInflightComputeLaunch(launch);
+		} catch (...) {
+			eraseInflightComputeLaunch(launch.submit_id);
+			throw;
+		}
+		async_compute_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+		++async_compute_stats_.waits_due_to_limit;
+		eraseInflightComputeLaunch(launch.submit_id);
+	}
+}
+
+void avk2::VulkanEngine::waitForAllInflightComputeLaunches()
+{
+	for (;;) {
+		retireCompletedInflightComputeLaunches();
+
+		InflightComputeLaunch launch;
+		bool has_launch = false;
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			if (!inflight_compute_launches_.empty()) {
+				launch = inflight_compute_launches_.front();
+				has_launch = true;
+			}
+		}
+		if (!has_launch) {
+			return;
+		}
+
+		try {
+			waitForInflightComputeLaunch(launch);
+		} catch (...) {
+			eraseInflightComputeLaunch(launch.submit_id);
+			throw;
+		}
+		eraseInflightComputeLaunch(launch.submit_id);
+	}
+}
+
+void avk2::VulkanEngine::waitForBuffer(const avk2::raii::BufferData &buffer)
+{
+	waitForConflictingInflightLaunches({{&buffer, ResourceAccessKind::ReadWrite}});
+}
+
+void avk2::VulkanEngine::waitForImage(const avk2::raii::ImageData &image)
+{
+	waitForConflictingInflightLaunches({{&image, ResourceAccessKind::ReadWrite}});
+}
+
+int avk2::VulkanEngine::acquireRassertSlot(const std::shared_ptr<VulkanKernel> &kernel)
+{
+	rassert(kernel && kernel->isRassertUsed(), 2026031517255500006);
+	for (;;) {
+		retireCompletedInflightComputeLaunches();
+
+		bool slot_in_use[2] = {false, false};
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			for (const InflightComputeLaunch &launch : inflight_compute_launches_) {
+				if (launch.kernel.get() != kernel.get() || launch.rassert_slot < 0) {
+					continue;
+				}
+				slot_in_use[launch.rassert_slot] = true;
+			}
+		}
+		for (int slot = 0; slot < 2; ++slot) {
+			if (!slot_in_use[slot]) {
+				kernel->resetRassertCode(static_cast<size_t>(slot));
+				return slot;
+			}
+		}
+
+			VulkanEngine::InflightComputeLaunch oldest;
+		bool found = false;
+		{
+			Lock lock(inflight_compute_launches_mutex_);
+			for (const InflightComputeLaunch &launch : inflight_compute_launches_) {
+				if (launch.kernel.get() == kernel.get() && launch.rassert_slot >= 0) {
+					oldest = launch;
+					found = true;
+					break;
+				}
+			}
+		}
+		rassert(found, 2026031517255500007);
+		timer wait_timer;
+		try {
+			waitForInflightComputeLaunch(oldest);
+		} catch (...) {
+			eraseInflightComputeLaunch(oldest.submit_id);
+			throw;
+		}
+		async_compute_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+		++async_compute_stats_.waits_due_to_limit;
+		eraseInflightComputeLaunch(oldest.submit_id);
+	}
+}
+
+avk2::AsyncComputeStats avk2::VulkanEngine::getAsyncComputeStats(bool wait_for_all)
+{
+	if (wait_for_all) {
+		waitForAllInflightComputeLaunches();
+	} else {
+		retireCompletedInflightComputeLaunches();
+	}
+
+	AsyncComputeStats stats = async_compute_stats_;
+	if (completed_compute_intervals_.empty()) {
+		return stats;
+	}
+
+	std::vector<CompletedComputeInterval> intervals = completed_compute_intervals_;
+	std::sort(intervals.begin(), intervals.end(), [](const CompletedComputeInterval &lhs, const CompletedComputeInterval &rhs) {
+		return lhs.start_ticks < rhs.start_ticks;
+	});
+
+	uint64_t total_ticks = intervals.back().end_ticks - intervals.front().start_ticks;
+	uint64_t busy_ticks = 0;
+	uint64_t current_start = intervals.front().start_ticks;
+	uint64_t current_end = intervals.front().end_ticks;
+	std::vector<uint64_t> gap_ticks;
+	for (size_t i = 1; i < intervals.size(); ++i) {
+		if (intervals[i].start_ticks > current_end) {
+			busy_ticks += current_end - current_start;
+			gap_ticks.push_back(intervals[i].start_ticks - current_end);
+			current_start = intervals[i].start_ticks;
+			current_end = intervals[i].end_ticks;
+		} else {
+			current_end = std::max(current_end, intervals[i].end_ticks);
+		}
+	}
+	busy_ticks += current_end - current_start;
+	uint64_t idle_ticks = total_ticks - busy_ticks;
+
+	stats.total_seconds = ticksToSeconds(total_ticks, timestamp_period_nanos_);
+	stats.busy_seconds = ticksToSeconds(busy_ticks, timestamp_period_nanos_);
+	stats.idle_seconds = ticksToSeconds(idle_ticks, timestamp_period_nanos_);
+	if (stats.total_seconds > 0.0) {
+		stats.busy_percent = 100.0 * stats.busy_seconds / stats.total_seconds;
+		stats.idle_percent = 100.0 * stats.idle_seconds / stats.total_seconds;
+	}
+	stats.gaps_count = gap_ticks.size();
+	if (!gap_ticks.empty()) {
+		std::sort(gap_ticks.begin(), gap_ticks.end());
+		stats.median_gap_seconds = ticksToSeconds(gap_ticks[gap_ticks.size() / 2], timestamp_period_nanos_);
+		stats.max_gap_seconds = ticksToSeconds(gap_ticks.back(), timestamp_period_nanos_);
+	}
+	return stats;
+}
+
+void avk2::VulkanEngine::logAsyncComputeStats(const std::string &label, bool wait_for_all)
+{
+	AsyncComputeStats stats = getAsyncComputeStats(wait_for_all);
+	std::cout << "Vulkan async compute stats";
+	if (!label.empty()) {
+		std::cout << " [" << label << "]";
+	}
+	std::cout << ": total=" << stats.total_seconds << " s"
+			  << ", busy=" << stats.busy_seconds << " s (" << stats.busy_percent << "%)"
+			  << ", idle=" << stats.idle_seconds << " s (" << stats.idle_percent << "%)"
+			  << ", launches=" << stats.launches_count
+			  << ", gaps=" << stats.gaps_count
+			  << ", median_gap=" << stats.median_gap_seconds << " s"
+			  << ", max_gap=" << stats.max_gap_seconds << " s"
+			  << ", waits_due_to_limit=" << stats.waits_due_to_limit
+			  << ", wait_due_to_limit_total=" << stats.wait_due_to_limit_seconds << " s"
+			  << std::endl;
+}
+
 std::shared_ptr<avk2::VulkanKernel> avk2::VulkanEngine::getOrCreateComputeKernel(const std::string &family_key, const std::string &variant_key, const std::function<std::shared_ptr<VulkanKernel>()> &create_fn)
 {
 	auto family_it = compute_pipeline_caches_.find(family_key);
@@ -718,6 +1043,13 @@ void avk2::VulkanEngine::init(uint64_t vk_device_id, bool enable_validation_laye
 	device_ = Device(vk_device_id_);
 	bool inited_ok = device_.init(*avk2_context_->instance_context_->instance());
 	rassert(inited_ok, 629844440093078);
+	timestamp_period_nanos_ = getPhysicalDevice().getProperties().limits.timestampPeriod;
+
+	vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, 262144);
+	async_compute_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
+	next_async_compute_query_ = 0;
+	next_compute_submit_id_ = 1;
+	resetAsyncComputeStats();
 
 	allocateStagingWriteBuffers();
 	allocateStagingReadBuffers();
@@ -1153,11 +1485,13 @@ void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, si
 
 void avk2::VulkanEngine::clearKernels()
 {
+	waitForAllInflightComputeLaunches();
 	clearPipelineCaches();
 }
 
 void avk2::VulkanEngine::clearStagingBuffers()
 {
+	waitForAllInflightComputeLaunches();
 	for (int i = 0; i < 2; ++i) {
 		staging_write_buffers_[i].reset();
 		staging_read_buffers_[i].reset();
@@ -1166,6 +1500,7 @@ void avk2::VulkanEngine::clearStagingBuffers()
 
 void avk2::VulkanEngine::clearFences()
 {
+	waitForAllInflightComputeLaunches();
     fences_.clear();
 }
 
@@ -1640,12 +1975,17 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 	rassert(!push_constant.isEmpty(), 990402328745136); // this is not a strict requirement, but in all cases currently we use push constants, so let's ensure this
 
 	std::vector<vk::DescriptorType> descriptor_types = kernel->getDescriptorTypes();
+	const std::vector<DescriptorAccess> &descriptor_accesses = kernel->getDescriptorAccesses();
 	vk::raii::DescriptorSet descriptor_set = context.vk()->allocateDescriptor(kernel->descriptorSetLayout(), descriptor_types);
 
 	unsigned int nargs = args.size();
+	rassert(nargs == descriptor_accesses.size(), 2026031517422600001, nargs, descriptor_accesses.size());
 	std::vector<vk::DescriptorBufferInfo> buffers_info(nargs);
 	std::vector<vk::DescriptorImageInfo> images_info(nargs);
 	std::vector<vk::WriteDescriptorSet> descriptor_writes(nargs);
+	std::vector<gpu::shared_device_buffer> buffers_keepalive;
+	std::vector<gpu::shared_device_image> images_keepalive;
+	std::vector<VulkanEngine::ResourceAccessRecord> resource_accesses;
 	for (size_t i = 0; i < nargs; ++i) {
 		unsigned int binding = i;
 		descriptor_writes[i] = vk::WriteDescriptorSet(descriptor_set, binding, 0, 1, descriptor_types[i]);
@@ -1658,6 +1998,8 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 			buffers_info[i] = vk::DescriptorBufferInfo(args[i].buffer->vkBufferData()->getBuffer(), args[i].buffer->vkoffset(), buffer_size);
 			descriptor_writes[i].setBufferInfo(buffers_info[i]);
+			buffers_keepalive.push_back(*args[i].buffer);
+			resource_accesses.push_back({args[i].buffer->vkBufferData(), toResourceAccessKind(descriptor_accesses[i])});
 		} else if (args[i].image) {
 			rassert(vk::DescriptorType::eStorageImage == descriptor_types[i] || vk::DescriptorType::eSampledImage == descriptor_types[i] || vk::DescriptorType::eCombinedImageSampler == descriptor_types[i], 423512341412);
 			// TODO ADD LAYOUTS SUPPORT: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
@@ -1674,26 +2016,31 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 			}
 			images_info[i] = vk::DescriptorImageInfo(args[i].image->vkImageData()->getSampler(), image_view, args[i].image->vkImageData()->getCurrentLayout());
 			descriptor_writes[i].setImageInfo(images_info[i]);
+			images_keepalive.push_back(*args[i].image);
+			resource_accesses.push_back({args[i].image->vkImageData(), toResourceAccessKind(descriptor_accesses[i])});
 		}
 	}
 	context.vk()->getDevice().updateDescriptorSets(descriptor_writes, nullptr);
 
-	vk::raii::CommandBuffer command_buffer = context.vk()->createCommandBuffer();
+	std::shared_ptr<vk::raii::CommandBuffer> command_buffer = std::make_shared<vk::raii::CommandBuffer>(context.vk()->createCommandBuffer());
+	uint32_t query_start = context.vk()->allocateTimestampQueries(2);
+	uint32_t query_end = query_start + 1;
 
-	command_buffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
-	command_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, kernel->pipeline());
+	command_buffer->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+	command_buffer->resetQueryPool(**context.vk()->async_compute_query_pool_, query_start, 2);
+	command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, kernel->pipeline());
+	command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **context.vk()->async_compute_query_pool_, query_start);
 
 	std::vector<vk::DescriptorSet> descriptor_sets_non_raii = { descriptor_set };
 	std::shared_ptr<vk::raii::DescriptorSetLayout> descriptor_set_layout_rassert_raii;
 	std::shared_ptr<vk::raii::DescriptorSet> rassert_descriptor_set;
+	int rassert_slot = -1;
 	if (kernel->isRassertUsed()) {
-		vk::DescriptorSetLayoutBinding descriptor_set_layout_rassert_binding(VK_RASSERT_CODE_BINDING_SLOT, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute);
-		descriptor_set_layout_rassert_raii = std::make_shared<vk::raii::DescriptorSetLayout>(std::move(context.vk()->getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo({}, descriptor_set_layout_rassert_binding))));
-
+		rassert_slot = context.vk()->acquireRassertSlot(kernel);
 		std::vector<vk::DescriptorType> rassert_descriptor_types(1, vk::DescriptorType::eStorageBuffer);
-		rassert_descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(*descriptor_set_layout_rassert_raii, rassert_descriptor_types)));
+		rassert_descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(context.vk()->allocateDescriptor(kernel->descriptorSetLayoutRassert(), rassert_descriptor_types)));
 
-		vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(kernel->rassertCodeAndLineBuffer().vkBufferData()->getBuffer(), kernel->rassertCodeAndLineBuffer().vkoffset(), kernel->rassertCodeAndLineBuffer().size());
+		vk::DescriptorBufferInfo buffer_info = vk::DescriptorBufferInfo(kernel->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).vkBufferData()->getBuffer(), kernel->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).vkoffset(), kernel->rassertCodeAndLineBuffer(static_cast<size_t>(rassert_slot)).size());
 		vk::WriteDescriptorSet descriptor_write = vk::WriteDescriptorSet(*rassert_descriptor_set, VK_RASSERT_CODE_BINDING_SLOT, 0, 1, rassert_descriptor_types[0]);
 		descriptor_write.setBufferInfo(buffer_info);
 
@@ -1701,33 +2048,75 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 		descriptor_sets_non_raii.push_back(*rassert_descriptor_set);
 	}
-	command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, vk::PipelineLayout(kernel->pipelineLayout()), 0, descriptor_sets_non_raii, nullptr);
+	command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, vk::PipelineLayout(kernel->pipelineLayout()), 0, descriptor_sets_non_raii, nullptr);
  
 	// we don't use C++ API here because we want to manually specify size of push constant (via passing push_constant.size())
 	rassert(VKF.vkCmdPushConstants, 315723128637936);
-	VKF.vkCmdPushConstants(vk::CommandBuffer(command_buffer), VkPipelineLayout(vk::PipelineLayout(kernel->pipelineLayout())), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant.size(), push_constant.ptr());
+	VKF.vkCmdPushConstants(vk::CommandBuffer(*command_buffer), VkPipelineLayout(vk::PipelineLayout(kernel->pipelineLayout())), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant.size(), push_constant.ptr());
 
 	std::vector<size_t> spirv_group_size = kernel->shaderModuleInfo().getGroupSize(name_);
 	for (size_t d = 0; d < 3; ++d) {
 		rassert(spirv_group_size[d] == ws.vkGroupSize()[d], 151466595490051);
 	}
 
-	dispatchAutoSubdivided(command_buffer, ws);
+	dispatchAutoSubdivided(*command_buffer, ws);
 
-	command_buffer.end();
+	command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, **context.vk()->async_compute_query_pool_, query_end);
+	command_buffer->end();
 	last_exec_prepairing_time_ = total_t.elapsed();
 
 	timer gpu_t;
 	gpu_t.start();
-	vk::raii::Fence &fence = context.vk()->findFence("readBuffer");
-	context.vk()->submitCommandBuffer(command_buffer, fence);
+	std::shared_ptr<vk::raii::Fence> fence = std::make_shared<vk::raii::Fence>(context.vk()->getDevice(), vk::FenceCreateInfo());
+	context.vk()->retireCompletedInflightComputeLaunches();
+	while (true) {
+		{
+			Lock lock(context.vk()->inflight_compute_launches_mutex_);
+			if (context.vk()->inflight_compute_launches_.size() < context.vk()->max_inflight_compute_launches_) {
+				break;
+			}
+		}
+		VulkanEngine::InflightComputeLaunch oldest;
+		{
+			Lock lock(context.vk()->inflight_compute_launches_mutex_);
+			rassert(!context.vk()->inflight_compute_launches_.empty(), 2026031517422600002);
+			oldest = context.vk()->inflight_compute_launches_.front();
+			}
+			timer wait_timer;
+			try {
+				context.vk()->waitForInflightComputeLaunch(oldest);
+			} catch (...) {
+				context.vk()->eraseInflightComputeLaunch(oldest.submit_id);
+				throw;
+			}
+			context.vk()->async_compute_stats_.wait_due_to_limit_seconds += wait_timer.elapsed();
+			++context.vk()->async_compute_stats_.waits_due_to_limit;
+			context.vk()->eraseInflightComputeLaunch(oldest.submit_id);
+		}
+	context.vk()->submitCommandBufferAsync(*command_buffer, *fence);
 	last_exec_gpu_time_ = gpu_t.elapsed();
 
-	if (kernel->isRassertUsed()) {
-		kernel->checkRassertCode();
+	{
+		Lock lock(context.vk()->inflight_compute_launches_mutex_);
+		VulkanEngine::InflightComputeLaunch launch;
+		launch.kernel = kernel;
+		launch.command_buffer = command_buffer;
+		launch.fence = fence;
+		launch.descriptor_set = std::make_shared<vk::raii::DescriptorSet>(std::move(descriptor_set));
+		launch.rassert_descriptor_set = rassert_descriptor_set;
+		launch.rassert_descriptor_set_layout = descriptor_set_layout_rassert_raii;
+		launch.buffers_keepalive = std::move(buffers_keepalive);
+		launch.images_keepalive = std::move(images_keepalive);
+		launch.resource_accesses = std::move(resource_accesses);
+		launch.query_start = query_start;
+		launch.query_end = query_end;
+		launch.rassert_slot = rassert_slot;
+		launch.submit_id = context.vk()->next_compute_submit_id_++;
+		context.vk()->inflight_compute_launches_.push_back(std::move(launch));
 	}
 
 	if (context.isMemoryGuardsChecksAfterKernelsEnabled()) {
+		context.vk()->waitForAllInflightComputeLaunches();
 		for (size_t i = 0; i < nargs; ++i) {
 			unsigned int binding = i;
 			if (args[i].buffer) {
@@ -2120,17 +2509,20 @@ void avk2::VulkanKernel::create(vk::raii::DescriptorSetLayout &&descriptor_set_l
 	this->pipeline_ = std::make_shared<vk::raii::Pipeline>(std::move(pipeline));
 	this->shader_module_info_ = std::make_shared<avk2::ShaderModuleInfo>(std::move(shader_module_info));
 	descriptor_types_ = avk2::ShaderModuleInfo::ensureNoEmptyDescriptorTypes(this->shader_module_info_->getDescriptorsTypes(VK_MAIN_BINDING_SET));
+	descriptor_accesses_ = avk2::ShaderModuleInfo::ensureNoEmptyDescriptorAccesses(this->shader_module_info_->getDescriptorsAccesses(VK_MAIN_BINDING_SET));
 	is_rassert_used_ = this->shader_module_info_->isDescriptorUsed(VK_RASSERT_CODE_SET, VK_RASSERT_CODE_BINDING_SLOT);
 
 	if (is_rassert_used_) {
 		gpu::Context context;
 		rassert(context.type() == gpu::Context::TypeVulkan, 483464293);
 
-		rassert_code_and_line_.resizeN(4);
 		unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
 											  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
 											  VK_RASSERT_CODE_MAGIC_GUARDS}; 
-		rassert_code_and_line_.writeN(data_code_and_line, 4);
+		for (size_t slot = 0; slot < rassert_code_and_line_.size(); ++slot) {
+			rassert_code_and_line_[slot].resizeN(4);
+			rassert_code_and_line_[slot].writeN(data_code_and_line, 4);
+		}
 	}
 }
 
@@ -2139,11 +2531,22 @@ bool avk2::VulkanKernel::isImageArrayed(unsigned int set, unsigned int binding)
 	return shader_module_info_->isImageArrayed(set, binding);
 }
 
-void avk2::VulkanKernel::checkRassertCode()
+void avk2::VulkanKernel::resetRassertCode(size_t slot)
+{
+	rassert(isRassertUsed(), 2026031517471400001);
+	rassert(slot < rassert_code_and_line_.size(), 2026031517471400002, slot, rassert_code_and_line_.size());
+	unsigned int data_code_and_line[4] = {VK_RASSERT_CODE_MAGIC_GUARDS,
+										  VK_RASSERT_CODE_EMPTY, VK_RASSERT_LINE_EMPTY,
+										  VK_RASSERT_CODE_MAGIC_GUARDS};
+	rassert_code_and_line_[slot].writeN(data_code_and_line, 4);
+}
+
+void avk2::VulkanKernel::checkRassertCode(size_t slot)
 {
 	rassert(isRassertUsed(), 683610370);
+	rassert(slot < rassert_code_and_line_.size(), 2026031517471400003, slot, rassert_code_and_line_.size());
 	unsigned int data_code_and_line[4] = {0, 239, 17, 0};
-	rassert_code_and_line_.readN(data_code_and_line, 4);
+	rassert_code_and_line_[slot].readN(data_code_and_line, 4);
 
 	// if there is out-of-bounds writing in some kernels - they can accidentally write their trash values into code/line memory bytes
 	// so let's check that magic guards were untouched (if there are out-of-bounds writing - it will probably overwrite magic guards too)

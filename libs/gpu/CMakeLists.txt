@@ -76,6 +76,7 @@ set (SOURCES_TEST
         libgpu/opencl/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/kernels/kernels.cpp
         libgpu/vulkan/tests/aplusb_test.cpp
+        libgpu/vulkan/tests/async_compute_test.cpp
         libgpu/vulkan/tests/atomic_add_test.cpp
         libgpu/vulkan/tests/batched_binary_search_test.cpp
         libgpu/vulkan/tests/buffers_magic_guards_test.cpp

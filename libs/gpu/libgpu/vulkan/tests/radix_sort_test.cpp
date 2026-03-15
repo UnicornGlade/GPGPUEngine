@@ -73,6 +73,7 @@ TEST(vulkan, radixSort)
 	for (size_t k = 0; k < devices.size(); ++k) {
 		std::cout << "Testing Vulkan device #" << (k + 1) << "/" << devices.size() << "..." << std::endl;
 		gpu::Context context = activateVKContext(devices[k]);
+		context.setMemoryGuardsChecksAfterKernels(false);
 
 		avk2::KernelSource copy_kernel(avk2::getFillBufferWithZerosKernel());
 		avk2::KernelSource local_counting(avk2::getRadixSort01LocalCountingKernel());
@@ -134,6 +135,36 @@ TEST(vulkan, radixSort)
 			}
 			gpu_times.push_back(gpu_timer.elapsed());
 		}
+		context.vk()->resetAsyncComputeStats();
+		for (unsigned int pass = 0; pass < (sizeof(unsigned int) << 1); ++pass) {
+			const unsigned int shift = pass << 2;
+			const gpu::gpu_mem_32u& in = (pass == 0u) ? input_gpu : tmp_gpu;
+
+			local_counting.exec(VulkanLocalCountingParams{shift, n}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu);
+			reduction.exec(VulkanReductionParams{block_hist_size, reduction_sizes.front()}, gpu::WorkSize(BLOCK_THREADS, reduction_sizes.front()), block_hist_gpu, reduction_buffers.front());
+			for (size_t level = 1; level < reduction_buffers.size(); ++level) {
+				reduction.exec(VulkanReductionParams{reduction_sizes[level - 1], reduction_sizes[level]},
+							   gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
+							   reduction_buffers[level - 1],
+							   reduction_buffers[level]);
+			}
+			for (int level = static_cast<int>(reduction_buffers.size()) - 2; level >= 0; --level) {
+				accumulation.exec(VulkanAccumulationParams{reduction_sizes[level]},
+								  gpu::WorkSize(BLOCK_THREADS, reduction_sizes[level]),
+								  reduction_buffers[level],
+								  reduction_buffers[level + 1]);
+			}
+			accumulation.exec(VulkanAccumulationParams{block_hist_size},
+							  gpu::WorkSize(BLOCK_THREADS, block_hist_size),
+							  block_hist_gpu,
+							  reduction_buffers.front());
+
+			scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize(BLOCK_THREADS, n), in, block_hist_gpu, output_gpu, reduction_buffers.back());
+			if (pass + 1u < (sizeof(unsigned int) << 1)) {
+				copy_kernel.exec(VulkanFillCopyParams{n}, gpu::WorkSize(BLOCK_THREADS, n), tmp_gpu, output_gpu);
+			}
+		}
+		context.vk()->logAsyncComputeStats("radixSort");
 
 		std::cout << "GPU radix-sort times (in seconds) - " << stats::valuesStatsLine(gpu_times) << std::endl;
 		double gpu_memory_size_gb = sizeof(unsigned int) * 2.0 * n / 1024.0 / 1024.0 / 1024.0;
