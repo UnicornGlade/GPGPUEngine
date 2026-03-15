@@ -56,12 +56,12 @@ bool isValidationLayersEnabled()
 
 bool isMemoryGuardsEnabled()
 {
-	return isEnabled("AVK_ENABLE_MEMORY_GUARDS", true);
+	return isEnabled("AVK_ENABLE_MEMORY_GUARDS", false);
 }
 
 bool isMemoryGuardsChecksAfterKernelsEnabled()
 {
-	return isEnabled("AVK_ENABLE_MEMORY_GUARDS_CHECKS_AFTER_KERNELS", true);
+	return isEnabled("AVK_ENABLE_MEMORY_GUARDS_CHECKS_AFTER_KERNELS", false);
 }
 
 gpu::Context activateVKContext(gpu::Device &device, bool silent=false)
