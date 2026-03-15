@@ -122,7 +122,8 @@ TEST(vulkan, aplusb)
 		gpu_b.writeN(wrong_bs.data(), n);
 		gpu::WorkSize worksize(VK_GROUP_SIZE, n);
 		// we expect that GPU rassert 160682133 will fail:
-		EXPECT_THROW(kernel_aplusb.exec(n, worksize, gpu_a, gpu_b, gpu_c), gpu_failure);
+		kernel_aplusb.exec(n, worksize, gpu_a, gpu_b, gpu_c);
+		EXPECT_THROW(context.vk()->waitForAllInflightComputeLaunches(), gpu_failure);
 	}
 
 	checkPostInvariants();
