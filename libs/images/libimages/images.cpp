@@ -356,6 +356,14 @@ bool isEscapePressed(std::vector<ImageWindow> windows, unsigned int milliseconds
 	return false;
 }
 
+void drawText(image8u &image, int x, int y, const std::string &text) {
+    auto wrapper = image.toCImg();
+    unsigned char white[] = {255, 255, 255};
+    unsigned char black[] = {0, 0, 0};
+    wrapper.img->draw_text(x, y, text.c_str(), white, black, 0.8f, 18);
+    image.fromCImg(wrapper);
+}
+
 mouse_click_t ImageWindow::getMouseClick() {
     return cimg_display->display.button();
 }
@@ -366,6 +374,14 @@ int ImageWindow::getMouseX() {
 
 int ImageWindow::getMouseY() {
     return cimg_display->display.mouse_y();
+}
+
+int ImageWindow::getMouseWheel() {
+    return cimg_display->display.wheel();
+}
+
+void ImageWindow::resetMouseWheel() {
+    cimg_display->display.set_wheel();
 }
 
 size_t ImageWindow::width() {

@@ -46,12 +46,14 @@ set(HEADERS
         src/kernels/kernels.h
         src/io/camera_reader.h
         src/io/scene_reader.h
+        src/viewer/camera_orbit.h
 )
 
 set(SOURCES
         src/kernels/kernels.cpp
         src/io/camera_reader.cpp
         src/io/scene_reader.cpp
+        src/viewer/camera_orbit.cpp
 )
 
 set(LIBRARIES
@@ -119,12 +121,17 @@ else ()
 endif ()
 
 add_executable(main_aplusb     src/main_aplusb.cpp)
+add_executable(main_ao_viewer  src/main_ao_viewer.cpp)
 add_executable(main_linear_bvh src/main_linear_bvh.cpp)
+add_executable(ao_viewer_test  src/viewer/camera_orbit_test.cpp)
 
 target_link_libraries(main_aplusb     ${PROJECT_NAME}_core)
+target_link_libraries(main_ao_viewer  ${PROJECT_NAME}_core)
 target_link_libraries(main_linear_bvh ${PROJECT_NAME}_core ${OPENMP_CXX_LINK_TARGET})
+target_link_libraries(ao_viewer_test  ${PROJECT_NAME}_core ${GTEST_BOTH_LIBRARIES})
 
 if (GPU_CUDA_SUPPORT)
     target_include_directories(main_aplusb     PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_include_directories(main_ao_viewer  PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     target_include_directories(main_linear_bvh PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif ()

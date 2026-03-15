@@ -61,6 +61,8 @@ public:
     mouse_click_t getMouseClick();
     int getMouseX();
     int getMouseY();
+    int getMouseWheel();
+    void resetMouseWheel();
 
     size_t width();
     size_t height();
@@ -191,3 +193,5 @@ typedef TypedImage<unsigned char>   image8u;
 typedef TypedImage<unsigned int>    image32u;
 typedef TypedImage<int>             image32i;
 typedef TypedImage<float>           image32f;
+
+void drawText(image8u &image, int x, int y, const std::string &text);

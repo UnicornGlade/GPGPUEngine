@@ -38,7 +38,12 @@ layout (std430, binding = 5) writeonly buffer FramebufferAOOut
     float framebuffer_ambient_occlusion[];
 };
 
-layout (std430, binding = 6) readonly buffer CameraBuffer
+layout (std430, binding = 6) writeonly buffer FramebufferDepthOut
+{
+    float framebuffer_depth[];
+};
+
+layout (std430, binding = 7) readonly buffer CameraBuffer
 {
     CameraViewGPU camera;
 };
@@ -321,6 +326,7 @@ void main()
 
     uint idx = j * uint(camera.K.width) + i;
     framebuffer_face_id[idx] = faceIdBest;
+    framebuffer_depth[idx] = (faceIdBest >= 0) ? tBest : -1.0;
 
     float ao = 1.0; // background stays white
 

@@ -134,6 +134,7 @@ void run(int argc, char** argv)
         // Аллоцируем фрейм-буферы (то есть картинки в которые сохранится результат рендеринга)
         gpu::gpu_mem_32i framebuffer_face_id_gpu(width * height);
         gpu::gpu_mem_32f framebuffer_ambient_occlusion_gpu(width * height);
+        gpu::gpu_mem_32f framebuffer_depth_gpu(width * height);
 
         // Прогружаем входные данные по PCI-E шине: CPU RAM -> GPU VRAM
         timer pcie_writing_t;
@@ -174,7 +175,7 @@ void run(int argc, char** argv)
                         nfaces,
                         gpu::WorkSize(16, 16, width, height),
                         vertices_gpu, faces_gpu,
-                        framebuffer_face_id_gpu, framebuffer_ambient_occlusion_gpu,
+                        framebuffer_face_id_gpu, framebuffer_ambient_occlusion_gpu, framebuffer_depth_gpu,
                         camera_gpu);
                 } else {
                     rassert(false, 654724541234123);
@@ -252,7 +253,7 @@ void run(int argc, char** argv)
                         gpu::WorkSize(16, 16, width, height),
                         vertices_gpu, faces_gpu,
                         lbvh_nodes_gpu, leaf_faces_indices_gpu,
-                        framebuffer_face_id_gpu, framebuffer_ambient_occlusion_gpu,
+                        framebuffer_face_id_gpu, framebuffer_ambient_occlusion_gpu, framebuffer_depth_gpu,
                         camera_gpu);
                 } else {
                     rassert(false, 654724541234123);
