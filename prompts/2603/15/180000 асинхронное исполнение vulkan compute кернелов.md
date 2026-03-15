@@ -19,6 +19,8 @@
 - Добавлены новые Vulkan tests `asyncTinyWriteValueChain` и `asyncAplusbChain`.
 - Обновлён `AGENTS.md`: нетривиальные задачи теперь требуют подробного `docs/...` плана и краткого `prompts/...` файла со ссылкой на него.
 - Добавлен helper `scripts/profile_vulkan_async_nsys.py` для разборки `nsys` SQLite.
+- После просмотра `nsys` GUI отдельно проверен hot path по Vulkan API и выявлено, что заметную долю CPU-side времени съедают `vkCreateFence` и `vkDestroyFence`.
+- Для async compute launch добавлен отдельный pool/reuse механизм для fence-ов вместо `create/destroy` на каждый launch.
 
 ## Короткий лог результатов
 
@@ -26,3 +28,4 @@
 - На GTX 1650 `asyncTinyWriteValueChain` и `asyncAplusbChain` печатают встроенную async-статистику.
 - Descriptor pool и teardown path были доработаны для корректной работы при множестве inflight launches.
 - Подробный текущий статус, baseline и profiling procedure зафиксированы в `docs/vulkan_async_compute_plan.md`.
+- На `vulkan.radixSort` pool/reuse fence-ов убрал `vkCreateFence`/`vkDestroyFence` из hot path и улучшил текущий async baseline примерно до `80-83 ms` без профайлера и до `90.7 ms` под `nsys`.

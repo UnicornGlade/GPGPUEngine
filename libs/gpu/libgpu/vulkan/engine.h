@@ -493,6 +493,8 @@ namespace avk2 {
 
 		vk::raii::DescriptorPool &		getDescriptorPool();
 		vk::raii::CommandPool &			getCommandPool();
+		std::shared_ptr<vk::raii::Fence>		acquireInflightComputeFence();
+		void							recycleInflightComputeFence(std::shared_ptr<vk::raii::Fence> fence);
 
 		// TODO we can try to speedup it a bit more via triple-buffering
 		std::unique_ptr<avk2::raii::BufferData>		staging_read_buffers_[2];
@@ -514,6 +516,7 @@ namespace avk2 {
 		uint64_t						vk_device_id_;
 		size_t							max_inflight_compute_launches_;
 		std::deque<InflightComputeLaunch> inflight_compute_launches_;
+		std::deque<std::shared_ptr<vk::raii::Fence>> available_compute_fences_;
 		std::shared_ptr<vk::raii::QueryPool> async_compute_query_pool_;
 		uint32_t						next_async_compute_query_;
 		uint64_t						next_compute_submit_id_;

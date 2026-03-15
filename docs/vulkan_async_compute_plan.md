@@ -134,3 +134,76 @@ python3 scripts/profile_vulkan_async_nsys.py /tmp/nsys_radixsort.sqlite
 - Сравнить code-side stats и `nsys` на GTX 1650.
 - Прогнать весь `libgpu_test` на GTX 1650.
 - Зафиксировать итоговые before/after speedups и пузырьность в этом документе.
+
+## Дополнительный эксперимент: pool/reuse для Vulkan fence
+
+После просмотра `nsys` GUI выяснилось, что у первой async-реализации значительная часть CPU-side времени уходила в:
+
+- `vkCreateFence`
+- `vkDestroyFence`
+- `vkWaitForFences`
+
+Минимальная правка:
+
+- для async compute launch теперь используется отдельный pool `available_compute_fences_`;
+- новый launch берёт fence через `acquireInflightComputeFence()`;
+- после retire launch-а fence возвращается через `recycleInflightComputeFence()`;
+- старые keyed fence-ы (`findFence("readBuffer")`, `findFence("writeImage")` и т.п.) не менялись.
+
+### Сравнение `vulkan.radixSort` на GTX 1650
+
+Текущий async baseline до pool/reuse:
+
+- без профайлера:
+  - median `156.63 ms`
+  - async stats: total `153.30 ms`, busy `6.68%`, idle `93.32%`
+- под `nsys`:
+  - median `167.03 ms`
+  - `nsys`: total `1.837 s`, busy `11.53%`, idle `88.47%`
+  - top CPU Vulkan API:
+    - `vkWaitForFences`: `774.81 ms`
+    - `vkCreateFence`: `417.49 ms`
+    - `vkDestroyFence`: `374.54 ms`
+    - `vkQueueSubmit`: `114.76 ms`
+
+Вариант с pool/reuse fence-ов:
+
+- без профайлера:
+  - повторяемые запуски дали median `80.22 ms` и `83.23 ms`
+  - async stats: total около `76-77 ms`, busy около `10.9%`, idle около `89.1%`
+- под `nsys`:
+  - повторный прогон дал median `90.70 ms`
+  - `nsys`: total `0.975 s`, busy `19.82%`, idle `80.18%`
+  - top CPU Vulkan API:
+    - `vkWaitForFences`: `719.31 ms`
+    - `vkQueueSubmit`: `108.29 ms`
+    - `vkCreateFence`: `0.80 ms`
+    - `vkDestroyFence`: `0.54 ms`
+
+### Вывод по этому эксперименту
+
+- Pool/reuse fence-ов оказался полезным:
+  - `vkCreateFence` и `vkDestroyFence` практически исчезли из hot path.
+  - `vulkan.radixSort` ускорился примерно в `1.9x` относительно текущего async baseline без pool/reuse:
+    - `156.63 ms -> 80-83 ms` без профайлера;
+    - `167.03 ms -> 90.70 ms` под `nsys`.
+- После этого главным CPU-side bottleneck остался `vkWaitForFences`, а вторым — `vkQueueSubmit`.
+- Значит следующий кандидат на исправление уже не fence lifecycle, а сама модель submit/wait:
+  - уменьшение числа submit-ов;
+  - batching нескольких dispatch в один command buffer/submit;
+  - возможно, переход с per-launch fence waiting на другой completion-tracking primitive.
+
+### Какой вариант оказался проще
+
+Из двух идей:
+
+- `pool` свободных fence-ов;
+- более специфическое `reuse` fence-ов по фиксированным ключам/слотам;
+
+проще в реализации оказался именно общий pool/free-list:
+
+- не требуется привязывать fence к конкретному kernel family или submit slot;
+- не нужно отдельно синхронизировать ownership по именованным ключам;
+- код локализован в одном месте `VulkanEngine` и почти не затрагивает call sites.
+
+То есть на практике здесь самый простой рабочий вариант — это именно `pool + reuse` как единый механизм.

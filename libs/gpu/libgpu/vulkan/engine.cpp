@@ -579,6 +579,27 @@ vk::raii::CommandBuffer avk2::VulkanEngine::createCommandBuffer()
 	return command_buffer;
 }
 
+std::shared_ptr<vk::raii::Fence> avk2::VulkanEngine::acquireInflightComputeFence()
+{
+	Lock lock(inflight_compute_launches_mutex_);
+	if (!available_compute_fences_.empty()) {
+		std::shared_ptr<vk::raii::Fence> fence = available_compute_fences_.front();
+		available_compute_fences_.pop_front();
+		getDevice().resetFences(**fence);
+		return fence;
+	}
+	return std::make_shared<vk::raii::Fence>(getDevice(), vk::FenceCreateInfo());
+}
+
+void avk2::VulkanEngine::recycleInflightComputeFence(std::shared_ptr<vk::raii::Fence> fence)
+{
+	if (!fence) {
+		return;
+	}
+	Lock lock(inflight_compute_launches_mutex_);
+	available_compute_fences_.push_back(std::move(fence));
+}
+
 void avk2::VulkanEngine::submitCommandBuffer(const vk::raii::CommandBuffer &command_buffer, vk::raii::Fence &fence)
 {
 	submitCommandBufferAsync(command_buffer, fence);
@@ -748,6 +769,9 @@ void avk2::VulkanEngine::eraseInflightComputeLaunch(uint64_t submit_id)
 				break;
 			}
 		}
+	}
+	if (removed_launch.has_value()) {
+		recycleInflightComputeFence(std::move(removed_launch->fence));
 	}
 }
 
@@ -1501,7 +1525,8 @@ void avk2::VulkanEngine::clearStagingBuffers()
 void avk2::VulkanEngine::clearFences()
 {
 	waitForAllInflightComputeLaunches();
-    fences_.clear();
+	fences_.clear();
+	available_compute_fences_.clear();
 }
 
 avk2::VersionedBinary::VersionedBinary(const char *data, const size_t size)
@@ -2067,7 +2092,7 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 
 	timer gpu_t;
 	gpu_t.start();
-	std::shared_ptr<vk::raii::Fence> fence = std::make_shared<vk::raii::Fence>(context.vk()->getDevice(), vk::FenceCreateInfo());
+	std::shared_ptr<vk::raii::Fence> fence = context.vk()->acquireInflightComputeFence();
 	context.vk()->retireCompletedInflightComputeLaunches();
 	while (true) {
 		{
