@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
 #include <libgpu/vulkan/vk/common.vk>
 
 #include "defines.h"
@@ -14,40 +17,79 @@ layout (push_constant) uniform PushConstants {
 	uint shift;
 } params;
 
+shared uint bin_counter[(VK_GROUP_SIZE >> WARP_LG) * BINS_CNT];
+shared uint warp_pref[(VK_GROUP_SIZE >> WARP_LG) * BINS_CNT];
+shared uint bin_counter_by_all_warps[BINS_CNT];
+shared uint block_bin_base[BINS_CNT];
 shared uint shared_block_offsets[BINS_CNT];
 shared uint shared_bin_base[BINS_CNT];
-shared uint block_bins[VK_GROUP_SIZE];
 
 layout (local_size_x = VK_GROUP_SIZE) in;
 void main()
 {
 	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
 	const uint thread_ind = gl_LocalInvocationID.x;
+	const uint warp_base = (thread_ind >> WARP_LG) << BITS_AT_A_TIME;
+	const uint lane_ind = thread_ind & (VK_SUBGROUP_SIZE - 1u);
+	const uint blocks_cnt = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
+	const uint block_ind = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+	const uint chunk_size = div_ceil(params.n, blocks_cnt);
+	const uint block_l = block_ind * chunk_size;
+	const uint block_r = min(params.n, block_l + chunk_size);
 
 	if (thread_ind < BINS_CNT) {
-		shared_block_offsets[thread_ind] = block_offsets[(global_ind / VK_GROUP_SIZE) * BINS_CNT + thread_ind];
+		block_bin_base[thread_ind] = 0u;
+		shared_block_offsets[thread_ind] = block_offsets[thread_ind + (block_ind << BITS_AT_A_TIME)];
 		shared_bin_base[thread_ind] = bin_base[thread_ind];
 	}
-
-	const uint val = (global_ind < params.n) ? input_values[global_ind] : 0u;
-	const uint bin = (val >> params.shift) & RADIX_MASK;
-	block_bins[thread_ind] = bin;
-
 	barrier();
 
-	if (global_ind < params.n) {
-		uint cnt = 0u;
-		for (uint i = thread_ind; i < VK_GROUP_SIZE && global_ind - thread_ind + i < params.n; ++i) {
-			if (block_bins[i] == bin) {
-				++cnt;
+	for (uint start = block_l; start < block_r; start += VK_GROUP_SIZE) {
+		if (thread_ind < ((VK_GROUP_SIZE >> WARP_LG) * BINS_CNT)) {
+			bin_counter[thread_ind] = 0u;
+			warp_pref[thread_ind] = 0u;
+		}
+		if (thread_ind < BINS_CNT) {
+			bin_counter_by_all_warps[thread_ind] = 0u;
+		}
+		barrier();
+
+		const uint ind = start + thread_ind;
+		const bool is_active = ind < block_r;
+		const uint val = is_active ? input_values[ind] : 0u;
+		const uint bin = is_active ? ((val >> params.shift) & RADIX_MASK) : 0u;
+
+		uint lane_prefix = 0u;
+		for (uint b = 0u; b < BINS_CNT; ++b) {
+			uvec4 mask = subgroupBallot(is_active && bin == b);
+			if (lane_ind == b) {
+				bin_counter[warp_base + b] = subgroupBallotBitCount(mask);
+			}
+			if (is_active && bin == b) {
+				lane_prefix = subgroupBallotExclusiveBitCount(mask);
 			}
 		}
+		barrier();
 
-		uint index = shared_block_offsets[bin] - cnt;
-		if (bin > 0u) {
-			index += shared_bin_base[bin - 1u];
+		if (thread_ind < BINS_CNT) {
+			uint sum = 0u;
+			for (uint warp = 0u; warp < (VK_GROUP_SIZE >> WARP_LG); ++warp) {
+				const uint idx = (warp << BITS_AT_A_TIME) + thread_ind;
+				warp_pref[idx] = sum;
+				sum += bin_counter[idx];
+			}
+			bin_counter_by_all_warps[thread_ind] = sum;
 		}
+		barrier();
 
-		output_values[index] = val;
+		if (is_active) {
+			output_values[shared_bin_base[bin] + shared_block_offsets[bin] + block_bin_base[bin] + warp_pref[warp_base + bin] + lane_prefix] = val;
+		}
+		barrier();
+
+		if (thread_ind < BINS_CNT) {
+			block_bin_base[thread_ind] += bin_counter_by_all_warps[thread_ind];
+		}
+		barrier();
 	}
 }

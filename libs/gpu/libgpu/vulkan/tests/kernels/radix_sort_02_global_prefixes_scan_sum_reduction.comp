@@ -6,36 +6,75 @@
 
 layout (std430, binding = 0) readonly buffer Buffer1In  { uint input_values[]; };
 layout (std430, binding = 1)          buffer Buffer2Out { uint output_values[]; };
+layout (std430, binding = 2)          buffer Buffer3Out { uint bin_counter[]; };
 
 layout (push_constant) uniform PushConstants {
-	uint buf1_sz;
-	uint buf2_sz;
+	uint n;
 } params;
 
-shared uint bins[BINS_CNT];
-shared uint prefix[BINS_CNT];
+shared uint lane_scan[VK_GROUP_SIZE];
+shared uint warp_totals[VK_GROUP_SIZE >> WARP_LG];
+shared uint block_sum;
 
 layout (local_size_x = VK_GROUP_SIZE) in;
 void main()
 {
-	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
-	const uint thread_ind = global_ind & 31u;
+	const uint thread_ind = gl_LocalInvocationID.x;
+	const uint lane_ind = thread_ind & (VK_SUBGROUP_SIZE - 1u);
+	const uint warp_ind = thread_ind >> WARP_LG;
+	const uint bin_ind = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
 
-	if (global_ind < params.buf2_sz) {
-		const uint base = ((global_ind & 0xfffffff0u) << 1);
-		const uint val1 = (base + thread_ind < params.buf1_sz) ? input_values[base + thread_ind] : 0u;
-		const uint val2 = (base + (thread_ind ^ 16u) < params.buf1_sz) ? input_values[base + (thread_ind ^ 16u)] : 0u;
-		if (params.buf2_sz > BINS_CNT) {
-			output_values[global_ind] = val1 + val2;
-		} else {
-			bins[global_ind] = val1 + val2;
-			prefix[global_ind] = 0u;
-			int i = int(global_ind);
-			while (i >= 0) {
-				prefix[global_ind] += bins[i];
-				--i;
+	uint total = 0u;
+	const uint block_elems = VK_GROUP_SIZE * VK_SUBGROUP_SIZE;
+	for (uint base = 0u; base < params.n; base += block_elems) {
+		uint block_total = 0u;
+		for (uint i = 0u; i < VK_SUBGROUP_SIZE; ++i) {
+			const uint hist_ind = base + thread_ind + i * VK_GROUP_SIZE;
+			const uint ind = (hist_ind << BITS_AT_A_TIME) + bin_ind;
+			const uint val = (hist_ind < params.n) ? input_values[ind] : 0u;
+			lane_scan[thread_ind] = val;
+			barrier();
+			for (uint offset = 1u; offset < VK_SUBGROUP_SIZE; offset <<= 1u) {
+				const uint add = (lane_ind >= offset) ? lane_scan[thread_ind - offset] : 0u;
+				barrier();
+				if (lane_ind >= offset) {
+					lane_scan[thread_ind] += add;
+				}
+				barrier();
 			}
-			output_values[global_ind] = prefix[global_ind];
+			const uint incl_sum = lane_scan[thread_ind];
+
+			if (lane_ind == VK_SUBGROUP_SIZE - 1u) {
+				warp_totals[warp_ind] = incl_sum;
+			}
+			barrier();
+
+			if (thread_ind == 0u) {
+				uint acc = 0u;
+				for (uint warp = 0u; warp < (VK_GROUP_SIZE >> WARP_LG); ++warp) {
+					const uint cur = warp_totals[warp];
+					warp_totals[warp] = acc;
+					acc += cur;
+				}
+			}
+			barrier();
+
+			const uint warp_offset = warp_totals[warp_ind];
+			const uint block_excl_sum = warp_offset + incl_sum - val;
+			if (hist_ind < params.n) {
+				output_values[ind] = block_total + block_excl_sum + total;
+			}
+
+			if (thread_ind == VK_GROUP_SIZE - 1u) {
+				block_sum = block_excl_sum + val;
+			}
+			barrier();
+			block_total += block_sum;
 		}
+		total += block_total;
+	}
+
+	if (thread_ind == VK_GROUP_SIZE - 1u) {
+		bin_counter[bin_ind] = total;
 	}
 }
