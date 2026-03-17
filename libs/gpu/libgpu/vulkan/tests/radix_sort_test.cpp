@@ -143,15 +143,8 @@ TEST(vulkan, radixSort)
 					}
 
 					{
-						profiling::ScopedRange phase_scope("vk radix accumulation", 0xFF8E44AD);
-						accumulation.exec(VulkanAccumulationParams{BINS_CNT},
-										  gpu::WorkSize1DTo2D(BLOCK_THREADS, BLOCK_THREADS),
-										  bin_counter_gpu, bin_base_gpu);
-					}
-
-					{
 						profiling::ScopedRange phase_scope("vk radix scatter", 0xFFC0392B);
-						scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize1DTo2D(BLOCK_THREADS, n), in, block_offsets_gpu, out, bin_base_gpu);
+						scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize1DTo2D(BLOCK_THREADS, n), in, block_offsets_gpu, out, bin_counter_gpu);
 					}
 				} else {
 					const gpu::gpu_mem_32u& in = (pass == 0u) ? input_gpu : tmp_gpu;
@@ -219,15 +212,8 @@ TEST(vulkan, radixSort)
 				}
 
 				{
-					profiling::ScopedRange phase_scope("vk radix accumulation", 0xFF8E44AD);
-					accumulation.exec(VulkanAccumulationParams{BINS_CNT},
-									  gpu::WorkSize1DTo2D(BLOCK_THREADS, BLOCK_THREADS),
-									  bin_counter_gpu, bin_base_gpu);
-				}
-
-				{
 					profiling::ScopedRange phase_scope("vk radix scatter", 0xFFC0392B);
-					scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize1DTo2D(BLOCK_THREADS, n), in, block_offsets_gpu, out, bin_base_gpu);
+					scatter.exec(VulkanScatterParams{n, shift}, gpu::WorkSize1DTo2D(BLOCK_THREADS, n), in, block_offsets_gpu, out, bin_counter_gpu);
 				}
 			} else {
 				const gpu::gpu_mem_32u& in = (pass == 0u) ? input_gpu : tmp_gpu;

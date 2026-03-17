@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
 #include <libgpu/vulkan/vk/common.vk>
 
 #include "defines.h"
@@ -12,7 +15,6 @@ layout (push_constant) uniform PushConstants {
 	uint n;
 } params;
 
-shared uint lane_scan[VK_GROUP_SIZE];
 shared uint warp_totals[VK_GROUP_SIZE >> WARP_LG];
 shared uint block_sum;
 
@@ -32,29 +34,18 @@ void main()
 			const uint hist_ind = base + thread_ind + i * VK_GROUP_SIZE;
 			const uint ind = (hist_ind << BITS_AT_A_TIME) + bin_ind;
 			const uint val = (hist_ind < params.n) ? input_values[ind] : 0u;
-			lane_scan[thread_ind] = val;
-			barrier();
-			for (uint offset = 1u; offset < VK_SUBGROUP_SIZE; offset <<= 1u) {
-				const uint add = (lane_ind >= offset) ? lane_scan[thread_ind - offset] : 0u;
-				barrier();
-				if (lane_ind >= offset) {
-					lane_scan[thread_ind] += add;
-				}
-				barrier();
-			}
-			const uint incl_sum = lane_scan[thread_ind];
+			const uint incl_sum = subgroupInclusiveAdd(val);
 
 			if (lane_ind == VK_SUBGROUP_SIZE - 1u) {
 				warp_totals[warp_ind] = incl_sum;
 			}
 			barrier();
 
-			if (thread_ind == 0u) {
-				uint acc = 0u;
-				for (uint warp = 0u; warp < (VK_GROUP_SIZE >> WARP_LG); ++warp) {
-					const uint cur = warp_totals[warp];
-					warp_totals[warp] = acc;
-					acc += cur;
+			if (warp_ind == 0u) {
+				const uint warp_val = (lane_ind < (VK_GROUP_SIZE >> WARP_LG)) ? warp_totals[lane_ind] : 0u;
+				const uint warp_incl_sum = subgroupInclusiveAdd(warp_val);
+				if (lane_ind < (VK_GROUP_SIZE >> WARP_LG)) {
+					warp_totals[lane_ind] = warp_incl_sum - warp_val;
 				}
 			}
 			barrier();
