@@ -99,6 +99,7 @@ foreach(VK_FILE IN LISTS VULKAN_SOURCES)
 endforeach()
 
 if (GPU_CUDA_SUPPORT)
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
@@ -113,6 +114,7 @@ if (GPU_CUDA_SUPPORT)
 
     add_definitions(-DCUDA_SUPPORT)
     add_library(${PROJECT_NAME}_core STATIC ${SOURCES} ${CUDA_SOURCES} ${HEADERS})
+    set_target_properties(${PROJECT_NAME}_core PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
     target_link_libraries(${PROJECT_NAME}_core ${LIBRARIES})
     target_include_directories(${PROJECT_NAME}_core PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 else ()

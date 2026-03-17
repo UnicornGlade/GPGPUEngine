@@ -22,14 +22,10 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 if (GPU_CUDA_SUPPORT)
-    find_package (CUDA REQUIRED)
-
     add_definitions(-DCUDA_SUPPORT)
-
-    cuda_add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
-else()
-    add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
 endif()
+
+add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
 
 target_link_libraries(${PROJECT_NAME} Threads::Threads libgpu)
 target_include_directories(${PROJECT_NAME} PUBLIC ${PROJECT_SOURCE_DIR})

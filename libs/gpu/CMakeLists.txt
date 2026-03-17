@@ -253,6 +253,7 @@ compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_conversion_fr
 find_package(Vulkan REQUIRED)
 
 if (GPU_CUDA_SUPPORT)
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
     enable_language(CUDA)
     find_package (CUDAToolkit REQUIRED)
 
@@ -262,6 +263,7 @@ if (GPU_CUDA_SUPPORT)
 
     add_definitions(-DCUDA_SUPPORT)
     add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
+    set_target_properties(${PROJECT_NAME} PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
     target_include_directories(${PROJECT_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 else ()
     add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
@@ -271,6 +273,9 @@ target_include_directories(${PROJECT_NAME} PUBLIC ${PROJECT_SOURCE_DIR} ${Vulkan
 target_link_libraries(${PROJECT_NAME} ${LIBRARIES})
 
 add_executable (${PROJECT_NAME}_test ${HEADERS_TEST} ${SOURCES_TEST})
+if (GPU_CUDA_SUPPORT)
+    set_target_properties(${PROJECT_NAME}_test PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
+endif ()
 target_link_libraries (${PROJECT_NAME}_test ${LIBRARIES} ${GTEST_BOTH_LIBRARIES} ${CMAKE_DL_LIBS})
 add_test(NAME ${PROJECT_NAME}_test COMMAND ${PROJECT_NAME}_test)
 if (GPU_CUDA_SUPPORT)
