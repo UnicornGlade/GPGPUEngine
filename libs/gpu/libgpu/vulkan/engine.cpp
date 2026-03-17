@@ -193,6 +193,23 @@ vk::raii::Instance avk2::createInstance(const vk::raii::Context &context, bool e
 	instance_create_info.setPApplicationInfo(&app_info);
 
 	std::vector<const char*> requested_extensions;
+	auto request_extension_if_supported = [&](const char *extension_name) {
+		if (context_supported_extensions.find(extension_name) != context_supported_extensions.end()) {
+			requested_extensions.push_back(extension_name);
+		}
+	};
+
+	request_extension_if_supported(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(__linux__)
+        request_extension_if_supported("VK_KHR_xlib_surface");
+        request_extension_if_supported("VK_KHR_xcb_surface");
+        request_extension_if_supported("VK_KHR_wayland_surface");
+#elif defined(_WIN32)
+        request_extension_if_supported("VK_KHR_win32_surface");
+#elif defined(__APPLE__)
+        request_extension_if_supported("VK_EXT_metal_surface");
+        request_extension_if_supported("VK_MVK_macos_surface");
+#endif
 
 	if (enable_validation_layers) {
 		rassert(!ENABLE_AND_ENSURE_RENDERDOC, 774349424); // RenderDoc can't capture frames while validation layers are in use
@@ -416,6 +433,9 @@ public:
 		if (DEBUG_PRINTF_EXT_ENABLED) {
 			rassert(device_info_.supportsExtension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME), 756565853);
 			device_enabled_extensions.push_back(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME);
+		}
+		if (device_info_.supportsExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+			device_enabled_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 		}
 		if (isMoltenVK() && device_info_.supportsExtension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
 			// Validation Error: [ VUID-VkDeviceCreateInfo-pProperties-04451 ] ... VK_KHR_portability_subset must be enabled because physical device VkPhysicalDevice 0x12f934d00[] supports it.
@@ -2051,12 +2071,11 @@ std::shared_ptr<avk2::VulkanKernel> avk2::KernelSource::compileComputeKernel(con
 	vk::PipelineShaderStageCreateInfo pipeline_stages_create_info({}, vk::ShaderStageFlagBits::eCompute, shader_module, name_.c_str());
 
         vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo require_subgroup;
-        if (shader_module_info.getGroupSize(name_)[0] % VK_SUBGROUP_SIZE == 0) {
+        if (shader_module_info.getGroupSize(name_)[0] % VK_SUBGROUP_SIZE == 0
+            && vk->device().supportsExtension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
             require_subgroup.requiredSubgroupSize = VK_SUBGROUP_SIZE;
-            if (vk->device().supportsExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)) {
-                pipeline_stages_create_info.flags |= vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups;
-                pipeline_stages_create_info.setPNext(&require_subgroup);
-            }
+            pipeline_stages_create_info.flags |= vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups;
+            pipeline_stages_create_info.setPNext(&require_subgroup);
         }
 
 	std::set<unsigned int> descriptors_sets = shader_module_info.getDescriptorsSets();
