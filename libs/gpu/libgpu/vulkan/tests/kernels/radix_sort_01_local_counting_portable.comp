@@ -1,0 +1,39 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (std430, binding = 0) readonly buffer Buffer1In  { uint input_values[]; };
+layout (std430, binding = 1)          buffer Buffer2Out { uint block_hist[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint shift;
+	uint n;
+} params;
+
+shared uint bins[BINS_CNT];
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+void main()
+{
+	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint thread_ind = gl_LocalInvocationID.x;
+	const uint block_ind = gl_WorkGroupID.x;
+	if (thread_ind < BINS_CNT) {
+		bins[thread_ind] = 0u;
+	}
+
+	barrier();
+
+	if (global_ind < params.n) {
+		const uint bin = (input_values[global_ind] >> params.shift) & RADIX_MASK;
+		atomicAdd(bins[bin], 1u);
+	}
+
+	barrier();
+
+	if (thread_ind < BINS_CNT) {
+		block_hist[thread_ind + block_ind * BINS_CNT] = bins[thread_ind];
+	}
+}

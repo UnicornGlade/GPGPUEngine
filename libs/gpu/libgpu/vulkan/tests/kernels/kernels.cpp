@@ -7,9 +7,13 @@
 #include "generated_kernels/image_conversion_from_float_to_T_comp.h"
 #include "generated_kernels/image_interpolation_comp.h"
 #include "generated_kernels/radix_sort_01_local_counting_comp.h"
+#include "generated_kernels/radix_sort_01_local_counting_portable_comp.h"
 #include "generated_kernels/radix_sort_02_global_prefixes_scan_sum_reduction_comp.h"
+#include "generated_kernels/radix_sort_02_global_prefixes_scan_sum_reduction_portable_comp.h"
 #include "generated_kernels/radix_sort_03_global_prefixes_scan_accumulation_comp.h"
+#include "generated_kernels/radix_sort_03_global_prefixes_scan_accumulation_portable_comp.h"
 #include "generated_kernels/radix_sort_04_scatter_comp.h"
+#include "generated_kernels/radix_sort_04_scatter_portable_comp.h"
 #include "generated_kernels/rasterize_frag.h"
 #include "generated_kernels/rasterize_vert.h"
 #include "generated_kernels/rasterize_blending_frag.h"
@@ -54,6 +58,18 @@ namespace avk2 {
 	}
 	const ProgramBinaries& getRadixSort04ScatterKernel() {
 		return vulkan_binaries_radix_sort_04_scatter_comp;
+	}
+	const ProgramBinaries& getRadixSort01LocalCountingPortableKernel() {
+		return vulkan_binaries_radix_sort_01_local_counting_portable_comp;
+	}
+	const ProgramBinaries& getRadixSort02GlobalPrefixesScanSumReductionPortableKernel() {
+		return vulkan_binaries_radix_sort_02_global_prefixes_scan_sum_reduction_portable_comp;
+	}
+	const ProgramBinaries& getRadixSort03GlobalPrefixesScanAccumulationPortableKernel() {
+		return vulkan_binaries_radix_sort_03_global_prefixes_scan_accumulation_portable_comp;
+	}
+	const ProgramBinaries& getRadixSort04ScatterPortableKernel() {
+		return vulkan_binaries_radix_sort_04_scatter_portable_comp;
 	}
 	std::vector<const ProgramBinaries*> getRasterizeKernel() {
 		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_frag};

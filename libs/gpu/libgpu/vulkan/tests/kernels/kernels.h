@@ -13,6 +13,10 @@ namespace avk2 {
 	const ProgramBinaries& getRadixSort02GlobalPrefixesScanSumReductionKernel();
 	const ProgramBinaries& getRadixSort03GlobalPrefixesScanAccumulationKernel();
 	const ProgramBinaries& getRadixSort04ScatterKernel();
+	const ProgramBinaries& getRadixSort01LocalCountingPortableKernel();
+	const ProgramBinaries& getRadixSort02GlobalPrefixesScanSumReductionPortableKernel();
+	const ProgramBinaries& getRadixSort03GlobalPrefixesScanAccumulationPortableKernel();
+	const ProgramBinaries& getRadixSort04ScatterPortableKernel();
 	std::vector<const ProgramBinaries*> getRasterizeKernel();
 	std::vector<const ProgramBinaries*> getRasterizeWithBlendingKernel();
 	const ProgramBinaries& getWriteValueAtIndexKernel();

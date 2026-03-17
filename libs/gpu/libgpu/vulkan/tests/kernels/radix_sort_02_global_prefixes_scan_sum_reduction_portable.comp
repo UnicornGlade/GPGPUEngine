@@ -1,0 +1,41 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (std430, binding = 0) readonly buffer Buffer1In  { uint input_values[]; };
+layout (std430, binding = 1)          buffer Buffer2Out { uint output_values[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint buf1_sz;
+	uint buf2_sz;
+} params;
+
+shared uint bins[BINS_CNT];
+shared uint prefix[BINS_CNT];
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+void main()
+{
+	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint thread_ind = global_ind & 31u;
+
+	if (global_ind < params.buf2_sz) {
+		const uint base = ((global_ind & 0xfffffff0u) << 1);
+		const uint val1 = (base + thread_ind < params.buf1_sz) ? input_values[base + thread_ind] : 0u;
+		const uint val2 = (base + (thread_ind ^ 16u) < params.buf1_sz) ? input_values[base + (thread_ind ^ 16u)] : 0u;
+		if (params.buf2_sz > BINS_CNT) {
+			output_values[global_ind] = val1 + val2;
+		} else {
+			bins[global_ind] = val1 + val2;
+			prefix[global_ind] = 0u;
+			int i = int(global_ind);
+			while (i >= 0) {
+				prefix[global_ind] += bins[i];
+				--i;
+			}
+			output_values[global_ind] = prefix[global_ind];
+		}
+	}
+}

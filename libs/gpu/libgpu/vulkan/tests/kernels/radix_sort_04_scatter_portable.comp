@@ -1,0 +1,53 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (std430, binding = 0) readonly buffer Buffer1In  { uint input_values[]; };
+layout (std430, binding = 1) readonly buffer Buffer2In  { uint block_offsets[]; };
+layout (std430, binding = 2)          buffer Buffer3Out { uint output_values[]; };
+layout (std430, binding = 3) readonly buffer Buffer4In  { uint bin_base[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint n;
+	uint shift;
+} params;
+
+shared uint shared_block_offsets[BINS_CNT];
+shared uint shared_bin_base[BINS_CNT];
+shared uint block_bins[VK_GROUP_SIZE];
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+void main()
+{
+	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint thread_ind = gl_LocalInvocationID.x;
+
+	if (thread_ind < BINS_CNT) {
+		shared_block_offsets[thread_ind] = block_offsets[(global_ind / VK_GROUP_SIZE) * BINS_CNT + thread_ind];
+		shared_bin_base[thread_ind] = bin_base[thread_ind];
+	}
+
+	const uint val = (global_ind < params.n) ? input_values[global_ind] : 0u;
+	const uint bin = (val >> params.shift) & RADIX_MASK;
+	block_bins[thread_ind] = bin;
+
+	barrier();
+
+	if (global_ind < params.n) {
+		uint cnt = 0u;
+		for (uint i = thread_ind; i < VK_GROUP_SIZE && global_ind - thread_ind + i < params.n; ++i) {
+			if (block_bins[i] == bin) {
+				++cnt;
+			}
+		}
+
+		uint index = shared_block_offsets[bin] - cnt;
+		if (bin > 0u) {
+			index += shared_bin_base[bin - 1u];
+		}
+
+		output_values[index] = val;
+	}
+}

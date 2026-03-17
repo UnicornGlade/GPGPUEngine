@@ -1,0 +1,39 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (std430, binding = 0)          buffer Buffer1InOut { uint input_output_values[]; };
+layout (std430, binding = 1) readonly buffer Buffer2In    { uint block_sums[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint buf1_sz;
+} params;
+
+shared uint block_data[VK_GROUP_SIZE];
+shared uint block_data_copy[VK_GROUP_SIZE];
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+void main()
+{
+	const uint global_ind = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint thread_ind = gl_LocalInvocationID.x;
+
+	block_data[thread_ind] = (global_ind < params.buf1_sz) ? input_output_values[global_ind] : 0u;
+	block_data_copy[thread_ind] = block_data[thread_ind];
+
+	barrier();
+
+	if ((thread_ind & 16u) != 0u) {
+		block_data[thread_ind] += block_data_copy[thread_ind ^ 16u];
+	}
+
+	const uint block_ind = global_ind >> WARP_LG;
+	if (block_ind > 0u) {
+		block_data[thread_ind] += block_sums[((block_ind - 1u) << (WARP_LG - 1u)) + (thread_ind & 15u)];
+	}
+	if (global_ind < params.buf1_sz) {
+		input_output_values[global_ind] = block_data[thread_ind];
+	}
+}
