@@ -1316,6 +1316,7 @@ void avk2::VulkanEngine::logAsyncComputeStats(const std::string &label, bool wai
 			  << ", idle=" << stats.idle_seconds << " s (" << stats.idle_percent << "%)"
 			  << ", launches=" << stats.launches_count
 			  << ", gaps=" << stats.gaps_count
+			  << ", max_inflight=" << stats.max_inflight_observed
 			  << ", median_gap=" << stats.median_gap_seconds << " s"
 			  << ", max_gap=" << stats.max_gap_seconds << " s"
 			  << ", waits_due_to_limit=" << stats.waits_due_to_limit
@@ -1387,6 +1388,7 @@ void avk2::VulkanEngine::logAsyncRenderStats(const std::string &label, bool wait
 			  << ", idle=" << stats.idle_seconds << " s (" << stats.idle_percent << "%)"
 			  << ", launches=" << stats.launches_count
 			  << ", gaps=" << stats.gaps_count
+			  << ", max_inflight=" << stats.max_inflight_observed
 			  << ", median_gap=" << stats.median_gap_seconds << " s"
 			  << ", max_gap=" << stats.max_gap_seconds << " s"
 			  << ", waits_due_to_limit=" << stats.waits_due_to_limit
@@ -2070,13 +2072,27 @@ std::shared_ptr<avk2::VulkanKernel> avk2::KernelSource::compileComputeKernel(con
 
 	vk::PipelineShaderStageCreateInfo pipeline_stages_create_info({}, vk::ShaderStageFlagBits::eCompute, shader_module, name_.c_str());
 
-        vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo require_subgroup;
-        if (shader_module_info.getGroupSize(name_)[0] % VK_SUBGROUP_SIZE == 0
-            && vk->device().supportsExtension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
-            require_subgroup.requiredSubgroupSize = VK_SUBGROUP_SIZE;
-            pipeline_stages_create_info.flags |= vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups;
-            pipeline_stages_create_info.setPNext(&require_subgroup);
-        }
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo require_subgroup;
+	if (shader_module_info.getGroupSize(name_)[0] % VK_SUBGROUP_SIZE == 0
+		&& vk->device().supportsExtension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+		vk::PhysicalDeviceSubgroupSizeControlProperties subgroup_props =
+			vk->getPhysicalDevice().getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceSubgroupSizeControlProperties>()
+				.get<vk::PhysicalDeviceSubgroupSizeControlProperties>();
+		vk::PhysicalDeviceSubgroupSizeControlFeatures subgroup_features =
+			vk->getPhysicalDevice().getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceSubgroupSizeControlFeatures>()
+				.get<vk::PhysicalDeviceSubgroupSizeControlFeatures>();
+		const bool supports_required_compute_subgroup_size =
+			subgroup_features.subgroupSizeControl
+			&& subgroup_features.computeFullSubgroups
+			&& (subgroup_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute) == vk::ShaderStageFlagBits::eCompute
+			&& subgroup_props.minSubgroupSize <= VK_SUBGROUP_SIZE
+			&& subgroup_props.maxSubgroupSize >= VK_SUBGROUP_SIZE;
+		if (supports_required_compute_subgroup_size) {
+			require_subgroup.requiredSubgroupSize = VK_SUBGROUP_SIZE;
+			pipeline_stages_create_info.flags |= vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups;
+			pipeline_stages_create_info.setPNext(&require_subgroup);
+		}
+	}
 
 	std::set<unsigned int> descriptors_sets = shader_module_info.getDescriptorsSets();
 	// let's check that common.vk (and so rassert.vk) was included from Vulkan kernel:
@@ -2547,6 +2563,9 @@ void avk2::KernelSource::exec(const PushConstant &params, const gpu::WorkSize &w
 		launch.rassert_slot = rassert_slot;
 		launch.submit_id = context.vk()->next_compute_submit_id_++;
 		context.vk()->inflight_compute_launches_.push_back(std::move(launch));
+		context.vk()->async_compute_stats_.max_inflight_observed = std::max(
+			context.vk()->async_compute_stats_.max_inflight_observed,
+			context.vk()->inflight_compute_launches_.size());
 	}
 
 	if (context.isMemoryGuardsChecksAfterKernelsEnabled()) {
@@ -2738,6 +2757,7 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 		if (context.vk()->async_render_timestamps_enabled_) {
 			query_start = context.vk()->allocateRenderTimestampQueries(2);
 			query_end = query_start + 1;
+			command_buffer->resetQueryPool(**context.vk()->async_render_query_pool_, query_start, 2);
 			command_buffer->writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **context.vk()->async_render_query_pool_, query_start);
 		}
 
@@ -2871,6 +2891,9 @@ void avk2::KernelSource::launchRender(const RenderBuilder &params, const Arg &ar
 
 			Lock lock(context.vk()->inflight_render_launches_mutex_);
 			context.vk()->inflight_render_launches_.push_back(std::move(launch));
+			context.vk()->async_render_stats_.max_inflight_observed = std::max(
+				context.vk()->async_render_stats_.max_inflight_observed,
+				context.vk()->inflight_render_launches_.size());
 		}
 		last_exec_gpu_time_ = gpu_t.elapsed();
 	}

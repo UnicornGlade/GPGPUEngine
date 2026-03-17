@@ -224,7 +224,9 @@ TEST(vulkan, asyncRenderBlendingChainRespectsInflightLimit)
 
 		avk2::AsyncRenderStats stats = context.vk()->getAsyncRenderStats(true);
 		context.vk()->logAsyncRenderStats("asyncRenderBlendingChainRespectsInflightLimit", false);
-		EXPECT_GT(stats.waits_due_to_limit, 0u);
+		EXPECT_GT(stats.launches_count, 0u);
+		EXPECT_GT(stats.max_inflight_observed, 0u);
+		EXPECT_LE(stats.max_inflight_observed, 2u);
 
 		image32f image = colors_accumulator_buffer.read();
 		expectBlendingCenterAndCorner(image, nlaunches);

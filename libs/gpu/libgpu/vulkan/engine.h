@@ -116,6 +116,7 @@ namespace avk2 {
 		double max_gap_seconds = 0.0;
 		size_t launches_count = 0;
 		size_t gaps_count = 0;
+		size_t max_inflight_observed = 0;
 		size_t waits_due_to_limit = 0;
 		double wait_due_to_limit_seconds = 0.0;
 	};
