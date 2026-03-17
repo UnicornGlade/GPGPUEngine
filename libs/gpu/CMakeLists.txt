@@ -141,6 +141,20 @@ function (compile_opencl_nospir newoutfiles program includefiles defines ocl_maj
     set (VARIABLE_SUFFIX ${CL_NAME}${defines_str}_nospir_opencl${ocl_major}${ocl_minor}0)
 
     if (MSVC)
+        if (NOT DEFINED SPIR_CLANG_BIN OR SPIR_CLANG_BIN STREQUAL "")
+            message(FATAL_ERROR
+                    "SPIR_CLANG_BIN is required on Windows to preprocess OpenCL kernels. "
+                    "Set it to your clang executable, for example: "
+                    "-DSPIR_CLANG_BIN=\"C:/Program Files/LLVM/bin/clang.exe\"")
+        endif ()
+
+        if (NOT EXISTS "${SPIR_CLANG_BIN}")
+            message(FATAL_ERROR
+                    "SPIR_CLANG_BIN points to a missing file: ${SPIR_CLANG_BIN}. "
+                    "Set it to your clang executable, for example: "
+                    "-DSPIR_CLANG_BIN=\"C:/Program Files/LLVM/bin/clang.exe\"")
+        endif ()
+
         set (OPENCL_CXX_COMPILER ${SPIR_CLANG_BIN})
     else ()
         set (OPENCL_CXX_COMPILER ${CMAKE_CXX_COMPILER})
