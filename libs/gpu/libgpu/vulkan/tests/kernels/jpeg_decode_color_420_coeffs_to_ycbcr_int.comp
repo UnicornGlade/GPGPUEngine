@@ -1,0 +1,201 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+
+layout (std430, binding = 0) readonly buffer CoeffsIn { int coeffs_in[]; };
+layout (std430, binding = 1) readonly buffer AllAcZeroFlagsIn { uint all_ac_zero_flags_in[]; };
+layout (std430, binding = 2) writeonly buffer YPlaneOut { uint y_plane[]; };
+layout (std430, binding = 3) writeonly buffer CbPlaneOut { uint cb_plane[]; };
+layout (std430, binding = 4) writeonly buffer CrPlaneOut { uint cr_plane[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint chroma_width;
+	uint chroma_height;
+	uint mcus_x;
+	uint total_mcus;
+} params;
+
+const uint ZIGZAG[64] = uint[](
+	 0u,  1u,  5u,  6u, 14u, 15u, 27u, 28u,
+	 2u,  4u,  7u, 13u, 16u, 26u, 29u, 42u,
+	 3u,  8u, 12u, 17u, 25u, 30u, 41u, 43u,
+	 9u, 11u, 18u, 24u, 31u, 40u, 44u, 53u,
+	10u, 19u, 23u, 32u, 39u, 45u, 52u, 54u,
+	20u, 22u, 33u, 38u, 46u, 51u, 55u, 60u,
+	21u, 34u, 37u, 47u, 50u, 56u, 59u, 61u,
+	35u, 36u, 48u, 49u, 57u, 58u, 62u, 63u
+);
+
+const int PRESCALE[64] = int[](
+	8192, 11363, 10703, 9633, 8192, 6436, 4433, 2260,
+	11363, 15760, 14846, 13361, 11363, 8928, 6149, 3135,
+	10703, 14846, 13985, 12586, 10703, 8410, 5793, 2953,
+	9633, 13361, 12586, 11327, 9633, 7568, 5213, 2658,
+	8192, 11363, 10703, 9633, 8192, 6436, 4433, 2260,
+	6436, 8928, 8410, 7568, 6436, 5057, 3483, 1776,
+	4433, 6149, 5793, 5213, 4433, 3483, 2399, 1223,
+	2260, 3135, 2953, 2658, 2260, 1776, 1223, 624
+);
+
+uint zigzag(uint pos) { return ZIGZAG[pos]; }
+
+int descale(int value, int bits)
+{
+	int round = 1 << (bits - 1);
+	if (value >= 0) {
+		return (value + round) >> bits;
+	}
+	return -(((-value) + round) >> bits);
+}
+
+int clampToByte(int value)
+{
+	return clamp(value, 0, 255);
+}
+
+void idctBlock(uint mcu, uint block, out int pixels[64])
+{
+	uint block_index = mcu * 6u + block;
+	uint base = block_index * 64u;
+	if (all_ac_zero_flags_in[block_index] != 0u) {
+		int dc_value = clampToByte(descale(coeffs_in[base], 3) + 128);
+		for (uint i = 0u; i < 64u; ++i) {
+			pixels[i] = dc_value;
+		}
+		return;
+	}
+
+	int stage[64];
+	for (uint col = 0u; col < 8u; ++col) {
+		int inputs[8];
+		for (uint row = 0u; row < 8u; ++row) {
+			inputs[row] = coeffs_in[base + zigzag(row * 8u + col)] * PRESCALE[row * 8u + col];
+		}
+		int tmp0 = inputs[0] >> 3;
+		int tmp1 = inputs[2] >> 3;
+		int tmp2 = inputs[4] >> 3;
+		int tmp3 = inputs[6] >> 3;
+		int tmp10 = tmp0 + tmp2;
+		int tmp11 = tmp0 - tmp2;
+		int tmp13 = tmp1 + tmp3;
+		int tmp12 = descale((tmp1 - tmp3) * 11585, 13) - tmp13;
+		int out0 = tmp10 + tmp13;
+		int out3 = tmp10 - tmp13;
+		int out1 = tmp11 + tmp12;
+		int out2 = tmp11 - tmp12;
+		int tmp4 = inputs[1] >> 3;
+		int tmp5 = inputs[3] >> 3;
+		int tmp6 = inputs[5] >> 3;
+		int tmp7 = inputs[7] >> 3;
+		int z13 = tmp6 + tmp5;
+		int z10 = tmp6 - tmp5;
+		int z11 = tmp4 + tmp7;
+		int z12 = tmp4 - tmp7;
+		int out7 = z11 + z13;
+		int tmp11i = descale((z11 - z13) * 11585, 13);
+		int z5 = descale((z10 + z12) * 15137, 13);
+		int tmp10i = z5 - descale(z12 * 8867, 13);
+		int tmp12i = z5 - descale(z10 * 21407, 13);
+		int out6 = tmp12i - out7;
+		int out5 = tmp11i - out6;
+		int out4 = tmp10i - out5;
+		stage[0u * 8u + col] = out0 + out7;
+		stage[7u * 8u + col] = out0 - out7;
+		stage[1u * 8u + col] = out1 + out6;
+		stage[6u * 8u + col] = out1 - out6;
+		stage[2u * 8u + col] = out2 + out5;
+		stage[5u * 8u + col] = out2 - out5;
+		stage[3u * 8u + col] = out3 + out4;
+		stage[4u * 8u + col] = out3 - out4;
+	}
+	for (uint row = 0u; row < 8u; ++row) {
+		int tmp0 = stage[row * 8u + 0u];
+		int tmp1 = stage[row * 8u + 2u];
+		int tmp2 = stage[row * 8u + 4u];
+		int tmp3 = stage[row * 8u + 6u];
+		int tmp10 = tmp0 + tmp2;
+		int tmp11 = tmp0 - tmp2;
+		int tmp13 = tmp1 + tmp3;
+		int tmp12 = descale((tmp1 - tmp3) * 11585, 13) - tmp13;
+		int out0 = tmp10 + tmp13;
+		int out3 = tmp10 - tmp13;
+		int out1 = tmp11 + tmp12;
+		int out2 = tmp11 - tmp12;
+		int z13 = stage[row * 8u + 5u] + stage[row * 8u + 3u];
+		int z10 = stage[row * 8u + 5u] - stage[row * 8u + 3u];
+		int z11 = stage[row * 8u + 1u] + stage[row * 8u + 7u];
+		int z12 = stage[row * 8u + 1u] - stage[row * 8u + 7u];
+		int out7 = z11 + z13;
+		int tmp11i = descale((z11 - z13) * 11585, 13);
+		int z5 = descale((z10 + z12) * 15137, 13);
+		int tmp10i = z5 - descale(z12 * 8867, 13);
+		int tmp12i = z5 - descale(z10 * 21407, 13);
+		int out6 = tmp12i - out7;
+		int out5 = tmp11i - out6;
+		int out4 = tmp10i - out5;
+		pixels[row * 8u + 0u] = clampToByte(descale(out0 + out7, 10) + 128);
+		pixels[row * 8u + 7u] = clampToByte(descale(out0 - out7, 10) + 128);
+		pixels[row * 8u + 1u] = clampToByte(descale(out1 + out6, 10) + 128);
+		pixels[row * 8u + 6u] = clampToByte(descale(out1 - out6, 10) + 128);
+		pixels[row * 8u + 2u] = clampToByte(descale(out2 + out5, 10) + 128);
+		pixels[row * 8u + 5u] = clampToByte(descale(out2 - out5, 10) + 128);
+		pixels[row * 8u + 3u] = clampToByte(descale(out3 + out4, 10) + 128);
+		pixels[row * 8u + 4u] = clampToByte(descale(out3 - out4, 10) + 128);
+	}
+}
+
+void main()
+{
+	uint mcu = workSize2DTo1D(gl_GlobalInvocationID);
+	if (mcu >= params.total_mcus) return;
+
+	uint mcu_x = mcu % params.mcus_x;
+	uint mcu_y = mcu / params.mcus_x;
+	uint base_x = mcu_x * 16u;
+	uint base_y = mcu_y * 16u;
+	int pixels[64];
+
+	for (uint block = 0u; block < 4u; ++block) {
+		idctBlock(mcu, block, pixels);
+		uint bx = block % 2u;
+		uint by = block / 2u;
+		for (uint ly = 0u; ly < 8u; ++ly) {
+			uint y = base_y + by * 8u + ly;
+			if (y >= params.height) continue;
+			for (uint lx = 0u; lx < 8u; ++lx) {
+				uint x = base_x + bx * 8u + lx;
+				if (x >= params.width) continue;
+				y_plane[y * params.width + x] = uint(pixels[ly * 8u + lx]);
+			}
+		}
+	}
+
+	uint chroma_base_x = mcu_x * 8u;
+	uint chroma_base_y = mcu_y * 8u;
+	idctBlock(mcu, 4u, pixels);
+	for (uint ly = 0u; ly < 8u; ++ly) {
+		uint y = chroma_base_y + ly;
+		if (y >= params.chroma_height) continue;
+		for (uint lx = 0u; lx < 8u; ++lx) {
+			uint x = chroma_base_x + lx;
+			if (x >= params.chroma_width) continue;
+			cb_plane[y * params.chroma_width + x] = uint(pixels[ly * 8u + lx]);
+		}
+	}
+	idctBlock(mcu, 5u, pixels);
+	for (uint ly = 0u; ly < 8u; ++ly) {
+		uint y = chroma_base_y + ly;
+		if (y >= params.chroma_height) continue;
+		for (uint lx = 0u; lx < 8u; ++lx) {
+			uint x = chroma_base_x + lx;
+			if (x >= params.chroma_width) continue;
+			cr_plane[y * params.chroma_width + x] = uint(pixels[ly * 8u + lx]);
+		}
+	}
+}

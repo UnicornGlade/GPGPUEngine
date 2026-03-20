@@ -11,7 +11,10 @@ namespace avk2 {
 	const ProgramBinaries& getInterpolationKernel(DataType type, int nchannels);
 	const ProgramBinaries& getJpegDecodeColor420Kernel();
 	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrKernel();
+	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrColmetaKernel();
+	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrIntKernel();
 	const ProgramBinaries& getJpegDecodeColor420ToCoeffsKernel();
+	const ProgramBinaries& getJpegDecodeColor420ToCoeffsColmetaKernel();
 	const ProgramBinaries& getJpegDecodeColor420ToYcbcrKernel();
 	const ProgramBinaries& getJpegDecodeColorKernel();
 	const ProgramBinaries& getJpegDecodeGrayscaleKernel();

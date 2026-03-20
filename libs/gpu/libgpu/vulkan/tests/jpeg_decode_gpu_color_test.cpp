@@ -37,10 +37,22 @@ constexpr int kGeneratedJpegQuality = 95;
 constexpr unsigned int kGeneratedRestartInterval = 1;
 constexpr uint32_t kMaxHuffmanTables = 4;
 constexpr uint32_t kHuffmanLutSize = 1u << 16u;
+constexpr uint32_t kJpeg420KernelGroupSize = 256;
 
 enum class ChromaSubsampling : uint32_t {
 	Yuv420,
 	Yuv444
+};
+
+enum class Jpeg420Stage2Variant : uint32_t {
+	FloatBaseline,
+	IntFixedPoint,
+	ColumnMetadata
+};
+
+enum class JpegBenchmarkSyncMode : uint32_t {
+	StageSynchronized,
+	IterationSynchronized
 };
 
 struct DecodedRgbImage {
@@ -154,10 +166,16 @@ struct GpuPreparedColorImage {
 };
 
 struct GpuColorDecodeBenchmarkStats {
+	std::string stage2_variant_name;
+	std::string sync_mode_name;
 	std::vector<double> upload_seconds;
 	std::vector<double> jpeg_decode_seconds;
+	std::vector<double> jpeg_entropy_to_coeffs_seconds;
+	std::vector<double> jpeg_coeffs_to_ycbcr_seconds;
+	std::vector<double> jpeg_ycbcr_to_rgb_seconds;
 	std::vector<double> brightness_reduce_seconds;
 	std::vector<double> readback_seconds;
+	double all_ac_zero_block_fraction = -1.0;
 	uint64_t cpu_total_sum = 0;
 	uint64_t gpu_total_sum = 0;
 	uint32_t pixel_count = 0;
@@ -195,6 +213,11 @@ std::vector<uint8_t> readFileBytes(const fs::path &path)
 	}
 	rassert(input.good() || input.eof(), 2026032022080100003, path.string());
 	return bytes;
+}
+
+fs::path localJpegWorkDir()
+{
+	return fs::current_path() / ".local_data" / "gpgpu_vulkan_gpu_jpeg_color_decode_dataset";
 }
 
 void writeFileBytes(const fs::path &path, const std::vector<uint8_t> &bytes)
@@ -239,6 +262,72 @@ DecodedRgbImage decodeJpegToRgbFromMemory(const std::vector<uint8_t> &compressed
 std::string subsamplingName(ChromaSubsampling subsampling)
 {
 	return subsampling == ChromaSubsampling::Yuv420 ? "420" : "444";
+}
+
+std::string normalizeEnvValue(const char *value)
+{
+	if (value == nullptr) {
+		return {};
+	}
+	std::string normalized = value;
+	std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return normalized;
+}
+
+Jpeg420Stage2Variant selectedJpeg420Stage2Variant()
+{
+	const std::string value = normalizeEnvValue(std::getenv("GPGPU_VULKAN_JPEG_420_STAGE2_VARIANT"));
+	if (value.empty() || value == "float" || value == "baseline") {
+		return Jpeg420Stage2Variant::FloatBaseline;
+	}
+	if (value == "int" || value == "integer" || value == "fixed") {
+		return Jpeg420Stage2Variant::IntFixedPoint;
+	}
+	if (value == "colmeta" || value == "column_meta" || value == "column-metadata") {
+		return Jpeg420Stage2Variant::ColumnMetadata;
+	}
+	rassert(false, 2026032117405000001, value);
+	return Jpeg420Stage2Variant::FloatBaseline;
+}
+
+const char *jpeg420Stage2VariantName(Jpeg420Stage2Variant variant)
+{
+	switch (variant) {
+		case Jpeg420Stage2Variant::FloatBaseline:
+			return "float";
+		case Jpeg420Stage2Variant::IntFixedPoint:
+			return "int";
+		case Jpeg420Stage2Variant::ColumnMetadata:
+			return "colmeta";
+	}
+	rassert(false, 2026032117405000002);
+	return "unknown";
+}
+
+JpegBenchmarkSyncMode selectedJpegBenchmarkSyncMode()
+{
+	const std::string value = normalizeEnvValue(std::getenv("GPGPU_VULKAN_JPEG_BENCH_SYNC_MODE"));
+	if (value.empty() || value == "stage" || value == "staged") {
+		return JpegBenchmarkSyncMode::StageSynchronized;
+	}
+	if (value == "iter" || value == "iteration" || value == "throughput") {
+		return JpegBenchmarkSyncMode::IterationSynchronized;
+	}
+	rassert(false, 2026032117405000003, value);
+	return JpegBenchmarkSyncMode::StageSynchronized;
+}
+
+const char *jpegBenchmarkSyncModeName(JpegBenchmarkSyncMode mode)
+{
+	switch (mode) {
+		case JpegBenchmarkSyncMode::StageSynchronized:
+			return "stage";
+		case JpegBenchmarkSyncMode::IterationSynchronized:
+			return "iteration";
+	}
+	rassert(false, 2026032117405000004);
+	return "unknown";
 }
 
 std::vector<uint8_t> encodeRgbJpegToMemory(const DecodedRgbImage &image, int quality,
@@ -663,7 +752,7 @@ GpuPreparedColorImage prepareGpuColorJpegArtifact(const fs::path &source_path, C
 																	 subsampling);
 
 	const std::string subsampling_name = subsamplingName(subsampling);
-	fs::path out_dir = fs::path("/tmp/gpgpu_vulkan_gpu_jpeg_color_decode_dataset");
+	fs::path out_dir = localJpegWorkDir();
 	fs::create_directories(out_dir);
 	const fs::path generated_path = out_dir / (source_path.stem().string() + "_rgb_" + subsampling_name + "_rst1_q95.jpg");
 	writeFileBytes(generated_path, generated_jpeg);
@@ -702,12 +791,69 @@ uint8_t unpackChannel(uint32_t packed_rgb, uint32_t channel)
 	return static_cast<uint8_t>((packed_rgb >> (channel * 8u)) & 0xFFu);
 }
 
+double measureAllAcZeroBlockFraction(const GpuPreparedColorImage &prepared)
+{
+	if (prepared.subsampling != ChromaSubsampling::Yuv420) {
+		return -1.0;
+	}
+
+	gpu::gpu_mem_32u dc_luts_gpu(prepared.gpu_jpeg.dc_luts.size());
+	gpu::gpu_mem_32u ac_luts_gpu(prepared.gpu_jpeg.ac_luts.size());
+	gpu::gpu_mem_32u qtables_gpu(prepared.gpu_jpeg.quant_tables.size());
+	gpu::gpu_mem_32u scan_words_gpu(prepared.gpu_jpeg.scan_words.size());
+	gpu::gpu_mem_32u start_positions_gpu(prepared.gpu_jpeg.start_positions.size());
+	gpu::gpu_mem_32i coeffs_gpu(size_t(prepared.gpu_jpeg.total_mcus) * 6u * 64u);
+	gpu::gpu_mem_32u all_ac_zero_flags_gpu(size_t(prepared.gpu_jpeg.total_mcus) * 6u);
+
+	dc_luts_gpu.writeN(prepared.gpu_jpeg.dc_luts.data(), prepared.gpu_jpeg.dc_luts.size());
+	ac_luts_gpu.writeN(prepared.gpu_jpeg.ac_luts.data(), prepared.gpu_jpeg.ac_luts.size());
+	qtables_gpu.writeN(prepared.gpu_jpeg.quant_tables.data(), prepared.gpu_jpeg.quant_tables.size());
+	scan_words_gpu.writeN(prepared.gpu_jpeg.scan_words.data(), prepared.gpu_jpeg.scan_words.size());
+	start_positions_gpu.writeN(prepared.gpu_jpeg.start_positions.data(), prepared.gpu_jpeg.start_positions.size());
+
+	avk2::KernelSource jpeg_decode_kernel(avk2::getJpegDecodeColor420ToCoeffsKernel());
+	const GpuColor420DecodePushConstants decode_params_420{
+		prepared.gpu_jpeg.total_mcus,
+		prepared.gpu_jpeg.components[0].qtable_selector,
+		prepared.gpu_jpeg.components[1].qtable_selector,
+		prepared.gpu_jpeg.components[2].qtable_selector,
+		prepared.gpu_jpeg.components[0].dc_table_selector,
+		prepared.gpu_jpeg.components[0].ac_table_selector,
+		prepared.gpu_jpeg.components[1].dc_table_selector,
+		prepared.gpu_jpeg.components[1].ac_table_selector,
+		prepared.gpu_jpeg.components[2].dc_table_selector,
+		prepared.gpu_jpeg.components[2].ac_table_selector
+	};
+	jpeg_decode_kernel.exec(decode_params_420,
+							gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+							dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu);
+	gpu::Context context;
+	context.vk()->waitForAllInflightComputeLaunches();
+
+	const std::vector<int32_t> coeffs_cpu = coeffs_gpu.readVector();
+	const size_t blocks_count = size_t(prepared.gpu_jpeg.total_mcus) * 6u;
+	size_t all_ac_zero_blocks = 0;
+	for (size_t block = 0; block < blocks_count; ++block) {
+		const size_t base = block * 64u;
+		bool all_ac_zero = true;
+		for (size_t i = 1; i < 64; ++i) {
+			if (coeffs_cpu[base + i] != 0) {
+				all_ac_zero = false;
+				break;
+			}
+		}
+		all_ac_zero_blocks += size_t(all_ac_zero);
+	}
+	return blocks_count == 0 ? 0.0 : static_cast<double>(all_ac_zero_blocks) / static_cast<double>(blocks_count);
+}
+
 GpuColorDecodeBenchmarkStats runGpuColorDecodeBenchmark(const GpuPreparedColorImage &prepared)
 {
 	GpuColorDecodeBenchmarkStats stats;
 	stats.pixel_count = prepared.cpu_reference.width * prepared.cpu_reference.height;
 	stats.cpu_total_sum = sumPixelsCpu(prepared.cpu_reference.pixels);
 	stats.cpu_average_brightness = static_cast<double>(stats.cpu_total_sum) / (stats.pixel_count * 3u);
+	stats.all_ac_zero_block_fraction = measureAllAcZeroBlockFraction(prepared);
 
 	gpu::gpu_mem_32u dc_luts_gpu(prepared.gpu_jpeg.dc_luts.size());
 	gpu::gpu_mem_32u ac_luts_gpu(prepared.gpu_jpeg.ac_luts.size());
@@ -715,6 +861,8 @@ GpuColorDecodeBenchmarkStats runGpuColorDecodeBenchmark(const GpuPreparedColorIm
 	gpu::gpu_mem_32u scan_words_gpu(prepared.gpu_jpeg.scan_words.size());
 	gpu::gpu_mem_32u start_positions_gpu(prepared.gpu_jpeg.start_positions.size());
 	gpu::gpu_mem_32i coeffs_gpu;
+	gpu::gpu_mem_32u all_ac_zero_flags_gpu;
+	gpu::gpu_mem_32u column_meta_gpu;
 	gpu::gpu_mem_32u y_plane_gpu;
 	gpu::gpu_mem_32u cb_plane_gpu;
 	gpu::gpu_mem_32u cr_plane_gpu;
@@ -723,10 +871,20 @@ GpuColorDecodeBenchmarkStats runGpuColorDecodeBenchmark(const GpuPreparedColorIm
 	gpu::gpu_mem_32u partial_sums_b;
 
 	const bool use_420_fast_path = prepared.subsampling == ChromaSubsampling::Yuv420;
+	const Jpeg420Stage2Variant stage2_variant = selectedJpeg420Stage2Variant();
+	const JpegBenchmarkSyncMode sync_mode = selectedJpegBenchmarkSyncMode();
+	const bool use_420_colmeta = use_420_fast_path && stage2_variant == Jpeg420Stage2Variant::ColumnMetadata;
+	const bool use_420_int = use_420_fast_path && stage2_variant == Jpeg420Stage2Variant::IntFixedPoint;
+	stats.stage2_variant_name = jpeg420Stage2VariantName(stage2_variant);
+	stats.sync_mode_name = jpegBenchmarkSyncModeName(sync_mode);
 	avk2::KernelSource jpeg_decode_kernel(use_420_fast_path
-											 ? avk2::getJpegDecodeColor420ToCoeffsKernel()
+											 ? (use_420_colmeta ? avk2::getJpegDecodeColor420ToCoeffsColmetaKernel()
+																: avk2::getJpegDecodeColor420ToCoeffsKernel())
 											 : avk2::getJpegDecodeColorKernel());
-	avk2::KernelSource coeffs_to_ycbcr_kernel(avk2::getJpegDecodeColor420CoeffsToYcbcrKernel());
+	avk2::KernelSource coeffs_to_ycbcr_kernel(use_420_colmeta
+												 ? avk2::getJpegDecodeColor420CoeffsToYcbcrColmetaKernel()
+												 : (use_420_int ? avk2::getJpegDecodeColor420CoeffsToYcbcrIntKernel()
+																: avk2::getJpegDecodeColor420CoeffsToYcbcrKernel()));
 	avk2::KernelSource ycbcr_to_rgb_kernel(avk2::getYcbcr420ToRgbKernel());
 	avk2::KernelSource reduce_kernel(avk2::getReduceSumPackedRgb8ToU32Kernel());
 
@@ -782,6 +940,8 @@ GpuColorDecodeBenchmarkStats runGpuColorDecodeBenchmark(const GpuPreparedColorIm
 		stats.pixel_count
 	};
 	coeffs_gpu.resizeN(size_t(prepared.gpu_jpeg.total_mcus) * 6u * 64u);
+	all_ac_zero_flags_gpu.resizeN(size_t(prepared.gpu_jpeg.total_mcus) * 6u);
+	column_meta_gpu.resizeN(size_t(prepared.gpu_jpeg.total_mcus) * 6u);
 	y_plane_gpu.resizeN(stats.pixel_count);
 	cb_plane_gpu.resizeN(size_t(prepared.gpu_jpeg.chroma_width) * prepared.gpu_jpeg.chroma_height);
 	cr_plane_gpu.resizeN(size_t(prepared.gpu_jpeg.chroma_width) * prepared.gpu_jpeg.chroma_height);
@@ -802,22 +962,68 @@ GpuColorDecodeBenchmarkStats runGpuColorDecodeBenchmark(const GpuPreparedColorIm
 		{
 			profiling::ScopedRange scope("jpeg gpu decode color", 0xFFC0392B);
 			if (use_420_fast_path) {
-				jpeg_decode_kernel.exec(decode_params_420,
-										gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.total_mcus),
-										dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu);
-				coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
-											gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.total_mcus),
-											coeffs_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
-				ycbcr_to_rgb_kernel.exec(convert_params_420,
-										gpu::WorkSize1DTo2D(VK_GROUP_SIZE, stats.pixel_count),
-										y_plane_gpu, cb_plane_gpu, cr_plane_gpu, decoded_pixels_gpu);
+				gpu::Context context;
+				if (sync_mode == JpegBenchmarkSyncMode::StageSynchronized) {
+					timer entropy_to_coeffs_timer;
+					if (use_420_colmeta) {
+						jpeg_decode_kernel.exec(decode_params_420,
+												gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+												dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu);
+					} else {
+						jpeg_decode_kernel.exec(decode_params_420,
+												gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+												dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu);
+					}
+					context.vk()->waitForAllInflightComputeLaunches();
+					stats.jpeg_entropy_to_coeffs_seconds.push_back(entropy_to_coeffs_timer.elapsed());
+
+					timer coeffs_to_ycbcr_timer;
+					if (use_420_colmeta) {
+						coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+													gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+													coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+					} else {
+						coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+													gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+													coeffs_gpu, all_ac_zero_flags_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+					}
+					context.vk()->waitForAllInflightComputeLaunches();
+					stats.jpeg_coeffs_to_ycbcr_seconds.push_back(coeffs_to_ycbcr_timer.elapsed());
+
+					timer ycbcr_to_rgb_timer;
+					ycbcr_to_rgb_kernel.exec(convert_params_420,
+											gpu::WorkSize1DTo2D(VK_GROUP_SIZE, stats.pixel_count),
+											y_plane_gpu, cb_plane_gpu, cr_plane_gpu, decoded_pixels_gpu);
+					context.vk()->waitForAllInflightComputeLaunches();
+					stats.jpeg_ycbcr_to_rgb_seconds.push_back(ycbcr_to_rgb_timer.elapsed());
+				} else {
+					if (use_420_colmeta) {
+						jpeg_decode_kernel.exec(decode_params_420,
+												gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+												dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu);
+						coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+													gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+													coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+					} else {
+						jpeg_decode_kernel.exec(decode_params_420,
+												gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+												dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu);
+						coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+													gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+													coeffs_gpu, all_ac_zero_flags_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+					}
+					ycbcr_to_rgb_kernel.exec(convert_params_420,
+											gpu::WorkSize1DTo2D(VK_GROUP_SIZE, stats.pixel_count),
+											y_plane_gpu, cb_plane_gpu, cr_plane_gpu, decoded_pixels_gpu);
+					context.vk()->waitForAllInflightComputeLaunches();
+				}
 			} else {
 				jpeg_decode_kernel.exec(decode_params,
 										gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.total_mcus),
 										dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, decoded_pixels_gpu);
+				gpu::Context context;
+				context.vk()->waitForAllInflightComputeLaunches();
 			}
-			gpu::Context context;
-			context.vk()->waitForAllInflightComputeLaunches();
 		}
 		stats.jpeg_decode_seconds.push_back(decode_timer.elapsed());
 
@@ -860,6 +1066,7 @@ GpuColorDecodeDiffStats compareGpuAndCpuDecode(const GpuPreparedColorImage &prep
 	gpu::gpu_mem_32u scan_words_gpu(prepared.gpu_jpeg.scan_words.size());
 	gpu::gpu_mem_32u start_positions_gpu(prepared.gpu_jpeg.start_positions.size());
 	gpu::gpu_mem_32i coeffs_gpu;
+	gpu::gpu_mem_32u all_ac_zero_flags_gpu;
 	gpu::gpu_mem_32u y_plane_gpu;
 	gpu::gpu_mem_32u cb_plane_gpu;
 	gpu::gpu_mem_32u cr_plane_gpu;
@@ -872,10 +1079,17 @@ GpuColorDecodeDiffStats compareGpuAndCpuDecode(const GpuPreparedColorImage &prep
 	start_positions_gpu.writeN(prepared.gpu_jpeg.start_positions.data(), prepared.gpu_jpeg.start_positions.size());
 
 	const bool use_420_fast_path = prepared.subsampling == ChromaSubsampling::Yuv420;
+	const Jpeg420Stage2Variant stage2_variant = selectedJpeg420Stage2Variant();
+	const bool use_420_colmeta = use_420_fast_path && stage2_variant == Jpeg420Stage2Variant::ColumnMetadata;
+	const bool use_420_int = use_420_fast_path && stage2_variant == Jpeg420Stage2Variant::IntFixedPoint;
 	avk2::KernelSource jpeg_decode_kernel(use_420_fast_path
-											 ? avk2::getJpegDecodeColor420ToCoeffsKernel()
+											 ? (use_420_colmeta ? avk2::getJpegDecodeColor420ToCoeffsColmetaKernel()
+																: avk2::getJpegDecodeColor420ToCoeffsKernel())
 											 : avk2::getJpegDecodeColorKernel());
-	avk2::KernelSource coeffs_to_ycbcr_kernel(avk2::getJpegDecodeColor420CoeffsToYcbcrKernel());
+	avk2::KernelSource coeffs_to_ycbcr_kernel(use_420_colmeta
+												 ? avk2::getJpegDecodeColor420CoeffsToYcbcrColmetaKernel()
+												 : (use_420_int ? avk2::getJpegDecodeColor420CoeffsToYcbcrIntKernel()
+																: avk2::getJpegDecodeColor420CoeffsToYcbcrKernel()));
 	avk2::KernelSource ycbcr_to_rgb_kernel(avk2::getYcbcr420ToRgbKernel());
 	const GpuColorDecodePushConstants decode_params{
 		prepared.gpu_jpeg.width,
@@ -929,17 +1143,28 @@ GpuColorDecodeDiffStats compareGpuAndCpuDecode(const GpuPreparedColorImage &prep
 		prepared.gpu_jpeg.width * prepared.gpu_jpeg.height
 	};
 	coeffs_gpu.resizeN(size_t(prepared.gpu_jpeg.total_mcus) * 6u * 64u);
+	all_ac_zero_flags_gpu.resizeN(size_t(prepared.gpu_jpeg.total_mcus) * 6u);
+	gpu::gpu_mem_32u column_meta_gpu(size_t(prepared.gpu_jpeg.total_mcus) * 6u);
 	y_plane_gpu.resizeN(size_t(prepared.gpu_jpeg.width) * prepared.gpu_jpeg.height);
 	cb_plane_gpu.resizeN(size_t(prepared.gpu_jpeg.chroma_width) * prepared.gpu_jpeg.chroma_height);
 	cr_plane_gpu.resizeN(size_t(prepared.gpu_jpeg.chroma_width) * prepared.gpu_jpeg.chroma_height);
 
 	if (use_420_fast_path) {
-		jpeg_decode_kernel.exec(decode_params_420,
-								gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.total_mcus),
-								dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu);
-		coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
-								gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.total_mcus),
-								coeffs_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+		if (use_420_colmeta) {
+			jpeg_decode_kernel.exec(decode_params_420,
+									gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+									dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu);
+			coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+									gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+									coeffs_gpu, all_ac_zero_flags_gpu, column_meta_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+		} else {
+			jpeg_decode_kernel.exec(decode_params_420,
+									gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+									dc_luts_gpu, ac_luts_gpu, qtables_gpu, scan_words_gpu, start_positions_gpu, coeffs_gpu, all_ac_zero_flags_gpu);
+			coeffs_to_ycbcr_kernel.exec(coeffs_to_ycbcr_params_420,
+									gpu::WorkSize1DTo2D(kJpeg420KernelGroupSize, prepared.gpu_jpeg.total_mcus),
+									coeffs_gpu, all_ac_zero_flags_gpu, y_plane_gpu, cb_plane_gpu, cr_plane_gpu);
+		}
 		ycbcr_to_rgb_kernel.exec(convert_params_420,
 								gpu::WorkSize1DTo2D(VK_GROUP_SIZE, prepared.gpu_jpeg.width * prepared.gpu_jpeg.height),
 								y_plane_gpu, cb_plane_gpu, cr_plane_gpu, decoded_pixels_gpu);
@@ -993,7 +1218,10 @@ void printGpuColorDecodeBenchmarkStats(const GpuPreparedColorImage &prepared, co
 	std::cout << "gpu color jpeg benchmark: " << prepared.generated_jpeg_path.filename().string()
 			  << " source=" << prepared.source_path.filename().string()
 			  << " subsampling=" << prepared.subsampling_name
+			  << " stage2_variant=" << stats.stage2_variant_name
+			  << " sync_mode=" << stats.sync_mode_name
 			  << " compressed_bytes=" << fs::file_size(prepared.generated_jpeg_path)
+			  << " all_ac_zero_blocks=" << std::fixed << std::setprecision(4) << stats.all_ac_zero_block_fraction
 			  << " cpu_sum=" << stats.cpu_total_sum
 			  << " gpu_sum=" << stats.gpu_total_sum
 			  << " avg_brightness=" << std::fixed << std::setprecision(6) << stats.gpu_average_brightness
@@ -1002,6 +1230,14 @@ void printGpuColorDecodeBenchmarkStats(const GpuPreparedColorImage &prepared, co
 			  << " (" << stats::valuesStatsLine(stats.upload_seconds) << ")" << std::endl;
 	std::cout << "  gpu jpeg decode median:        " << stats::median(stats.jpeg_decode_seconds) * 1000.0 << " ms"
 			  << " (" << stats::valuesStatsLine(stats.jpeg_decode_seconds) << ")" << std::endl;
+	if (!stats.jpeg_entropy_to_coeffs_seconds.empty()) {
+		std::cout << "    entropy -> coeffs median:    " << stats::median(stats.jpeg_entropy_to_coeffs_seconds) * 1000.0 << " ms"
+				  << " (" << stats::valuesStatsLine(stats.jpeg_entropy_to_coeffs_seconds) << ")" << std::endl;
+		std::cout << "    coeffs -> ycbcr median:      " << stats::median(stats.jpeg_coeffs_to_ycbcr_seconds) * 1000.0 << " ms"
+				  << " (" << stats::valuesStatsLine(stats.jpeg_coeffs_to_ycbcr_seconds) << ")" << std::endl;
+		std::cout << "    ycbcr -> rgb median:         " << stats::median(stats.jpeg_ycbcr_to_rgb_seconds) * 1000.0 << " ms"
+				  << " (" << stats::valuesStatsLine(stats.jpeg_ycbcr_to_rgb_seconds) << ")" << std::endl;
+	}
 	std::cout << "  gpu brightness reduce median:  " << stats::median(stats.brightness_reduce_seconds) * 1000.0 << " ms"
 			  << " (" << stats::valuesStatsLine(stats.brightness_reduce_seconds) << ")" << std::endl;
 	std::cout << "  readback median:               " << stats::median(stats.readback_seconds) * 1000.0 << " ms"

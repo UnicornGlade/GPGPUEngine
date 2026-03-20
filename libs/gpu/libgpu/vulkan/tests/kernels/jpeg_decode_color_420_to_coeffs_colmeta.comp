@@ -13,6 +13,7 @@ layout (std430, binding = 3) readonly buffer ScanDataIn { uint scan_data[]; };
 layout (std430, binding = 4) readonly buffer StartPositionsIn { uint start_positions[]; };
 layout (std430, binding = 5) writeonly buffer CoeffsOut { int coeffs_out[]; };
 layout (std430, binding = 6) writeonly buffer AllAcZeroFlagsOut { uint all_ac_zero_flags_out[]; };
+layout (std430, binding = 7) writeonly buffer ColumnMetaOut { uint column_meta_out[]; };
 
 layout (push_constant) uniform PushConstants {
 	uint total_mcus;
@@ -26,6 +27,17 @@ layout (push_constant) uniform PushConstants {
 	uint cr_dc_table;
 	uint cr_ac_table;
 } params;
+
+const uint INV_ZIGZAG[64] = uint[](
+	0u, 1u, 8u, 16u, 9u, 2u, 3u, 10u,
+	17u, 24u, 32u, 25u, 18u, 11u, 4u, 5u,
+	12u, 19u, 26u, 33u, 40u, 48u, 41u, 34u,
+	27u, 20u, 13u, 6u, 7u, 14u, 21u, 28u,
+	35u, 42u, 49u, 56u, 57u, 50u, 43u, 36u,
+	29u, 22u, 15u, 23u, 30u, 37u, 44u, 51u,
+	58u, 59u, 52u, 45u, 38u, 31u, 39u, 46u,
+	53u, 60u, 61u, 54u, 47u, 55u, 62u, 63u
+);
 
 struct BitStreamState {
 	uint next_word;
@@ -69,7 +81,7 @@ uint huffdecodeDc(inout BitStreamState state, uint table_selector)
 	refill(state);
 	uint code = peek(state, 16u);
 	uint entry = dc_luts[table_selector * 65536u + code];
-	rassert(entry != 0xffffffffu, 211041u);
+	rassert(entry != 0xffffffffu, 213381u);
 	consume(state, entry >> 8u);
 	return entry & 0xffu;
 }
@@ -79,7 +91,7 @@ uint huffdecodeAc(inout BitStreamState state, uint table_selector)
 	refill(state);
 	uint code = peek(state, 16u);
 	uint entry = ac_luts[table_selector * 65536u + code];
-	rassert(entry != 0xffffffffu, 211041u);
+	rassert(entry != 0xffffffffu, 213382u);
 	consume(state, entry >> 8u);
 	return entry & 0xffu;
 }
@@ -92,9 +104,19 @@ int huffExtend(int v, uint t)
 	return v;
 }
 
-void decodeBlock(inout BitStreamState state, uint dc_table_selector, uint ac_table_selector, uint qtable_selector, inout int dc_predictor, out int coeffs[64], out uint all_ac_zero)
+void decodeBlock(
+	inout BitStreamState state,
+	uint dc_table_selector,
+	uint ac_table_selector,
+	uint qtable_selector,
+	inout int dc_predictor,
+	out int coeffs[64],
+	out uint all_ac_zero,
+	out uint column_meta)
 {
 	all_ac_zero = 1u;
+	uint nonzero_col_mask = 0u;
+	uint nonzero_rows_gt0_col_mask = 0u;
 	for (uint i = 0u; i < 64u; ++i) coeffs[i] = 0;
 	uint dccat = huffdecodeDc(state, dc_table_selector);
 	refill(state);
@@ -102,6 +124,9 @@ void decodeBlock(inout BitStreamState state, uint dc_table_selector, uint ac_tab
 	consume(state, dccat);
 	dc_predictor += huffExtend(diff, dccat);
 	coeffs[0] = dc_predictor * int(quant_tables[qtable_selector * 64u]);
+	if (coeffs[0] != 0) {
+		nonzero_col_mask |= 1u;
+	}
 	for (uint pos = 1u; pos < 64u; ++pos) {
 		uint rrrrssss = huffdecodeAc(state, ac_table_selector);
 		if (rrrrssss == 0u) break;
@@ -116,14 +141,25 @@ void decodeBlock(inout BitStreamState state, uint dc_table_selector, uint ac_tab
 		coeffs[pos] = huffExtend(value, ssss) * int(quant_tables[qtable_selector * 64u + pos]);
 		if (coeffs[pos] != 0) {
 			all_ac_zero = 0u;
+			uint natural = INV_ZIGZAG[pos];
+			uint row = natural >> 3u;
+			uint col = natural & 7u;
+			nonzero_col_mask |= 1u << col;
+			if (row > 0u) {
+				nonzero_rows_gt0_col_mask |= 1u << col;
+			}
 		}
 	}
+	column_meta = nonzero_col_mask | (nonzero_rows_gt0_col_mask << 8u);
 }
 
-void storeBlock(uint mcu, uint block, const int coeffs[64])
+void storeBlock(uint mcu, uint block, const int coeffs[64], uint all_ac_zero, uint column_meta)
 {
-	uint base = (mcu * 6u + block) * 64u;
+	uint block_index = mcu * 6u + block;
+	uint base = block_index * 64u;
 	for (uint i = 0u; i < 64u; ++i) coeffs_out[base + i] = coeffs[i];
+	all_ac_zero_flags_out[block_index] = all_ac_zero;
+	column_meta_out[block_index] = column_meta;
 }
 
 void main()
@@ -142,16 +178,14 @@ void main()
 	int cb_dc = 0;
 	int cr_dc = 0;
 	uint all_ac_zero = 0u;
+	uint column_meta = 0u;
 
 	for (uint block = 0u; block < 4u; ++block) {
-		decodeBlock(state, params.y_dc_table, params.y_ac_table, params.y_qtable, y_dc, coeffs, all_ac_zero);
-		storeBlock(mcu, block, coeffs);
-		all_ac_zero_flags_out[mcu * 6u + block] = all_ac_zero;
+		decodeBlock(state, params.y_dc_table, params.y_ac_table, params.y_qtable, y_dc, coeffs, all_ac_zero, column_meta);
+		storeBlock(mcu, block, coeffs, all_ac_zero, column_meta);
 	}
-	decodeBlock(state, params.cb_dc_table, params.cb_ac_table, params.cb_qtable, cb_dc, coeffs, all_ac_zero);
-	storeBlock(mcu, 4u, coeffs);
-	all_ac_zero_flags_out[mcu * 6u + 4u] = all_ac_zero;
-	decodeBlock(state, params.cr_dc_table, params.cr_ac_table, params.cr_qtable, cr_dc, coeffs, all_ac_zero);
-	storeBlock(mcu, 5u, coeffs);
-	all_ac_zero_flags_out[mcu * 6u + 5u] = all_ac_zero;
+	decodeBlock(state, params.cb_dc_table, params.cb_ac_table, params.cb_qtable, cb_dc, coeffs, all_ac_zero, column_meta);
+	storeBlock(mcu, 4u, coeffs, all_ac_zero, column_meta);
+	decodeBlock(state, params.cr_dc_table, params.cr_ac_table, params.cr_qtable, cr_dc, coeffs, all_ac_zero, column_meta);
+	storeBlock(mcu, 5u, coeffs, all_ac_zero, column_meta);
 }

@@ -8,9 +8,10 @@ layout (local_size_x = VK_GROUP_SIZE) in;
 
 layout (std430, binding = 0) readonly buffer CoeffsIn { int coeffs_in[]; };
 layout (std430, binding = 1) readonly buffer AllAcZeroFlagsIn { uint all_ac_zero_flags_in[]; };
-layout (std430, binding = 2) writeonly buffer YPlaneOut { uint y_plane[]; };
-layout (std430, binding = 3) writeonly buffer CbPlaneOut { uint cb_plane[]; };
-layout (std430, binding = 4) writeonly buffer CrPlaneOut { uint cr_plane[]; };
+layout (std430, binding = 2) readonly buffer ColumnMetaIn { uint column_meta_in[]; };
+layout (std430, binding = 3) writeonly buffer YPlaneOut { uint y_plane[]; };
+layout (std430, binding = 4) writeonly buffer CbPlaneOut { uint cb_plane[]; };
+layout (std430, binding = 5) writeonly buffer CrPlaneOut { uint cr_plane[]; };
 
 layout (push_constant) uniform PushConstants {
 	uint width;
@@ -39,19 +40,45 @@ const uint ZIGZAG[64] = uint[](
 
 uint zigzag(uint pos) { return ZIGZAG[pos]; }
 
+void fillColumn(inout float stage[64], uint col, float value)
+{
+	for (uint row = 0u; row < 8u; ++row) {
+		stage[row * 8u + col] = value;
+	}
+}
+
+void fillPixelsDcOnly(uint base, out float pixels[64])
+{
+	float dc_value = clamp(float(coeffs_in[base]) * 0.125 + 128.5, 0.0, 255.0);
+	for (uint i = 0u; i < 64u; ++i) {
+		pixels[i] = dc_value;
+	}
+}
+
 void idctBlock(uint mcu, uint block, out float pixels[64])
 {
-	uint base = (mcu * 6u + block) * 64u;
-	if (all_ac_zero_flags_in[mcu * 6u + block] != 0u) {
-		float dc_value = clamp(float(coeffs_in[base]) * 0.125 + 128.5, 0.0, 255.0);
-		for (uint i = 0u; i < 64u; ++i) {
-			pixels[i] = dc_value;
-		}
+	uint block_index = mcu * 6u + block;
+	uint base = block_index * 64u;
+	if (all_ac_zero_flags_in[block_index] != 0u) {
+		fillPixelsDcOnly(base, pixels);
 		return;
 	}
 
+	uint column_meta = column_meta_in[block_index];
+	uint nonzero_col_mask = column_meta & 0xffu;
+	uint nonzero_rows_gt0_col_mask = (column_meta >> 8u) & 0xffu;
 	float stage[64];
 	for (uint col = 0u; col < 8u; ++col) {
+		uint col_bit = 1u << col;
+		if ((nonzero_col_mask & col_bit) == 0u) {
+			fillColumn(stage, col, 0.0);
+			continue;
+		}
+		if ((nonzero_rows_gt0_col_mask & col_bit) == 0u) {
+			float value = float(coeffs_in[base + zigzag(col)]) * SCALE[col] * 0.125;
+			fillColumn(stage, col, value);
+			continue;
+		}
 		float inputs[8];
 		for (uint row = 0u; row < 8u; ++row) {
 			inputs[row] = float(coeffs_in[base + zigzag(row * 8u + col)]) * SCALE[row] * SCALE[col];

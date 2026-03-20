@@ -100,6 +100,72 @@
 - Для воспроизводимых одиночных прогонов в текущем merged device ordering:
   - `GPGPU_VISIBLE_DEVICES=2` -> `Intel UHD 770`
   - `GPGPU_VISIBLE_DEVICES=3` -> `NVIDIA GeForce GTX 1650`
+- В benchmark-path добавлены отдельные timings для:
+  - `entropy -> coeffs`
+  - `coeffs -> ycbcr`
+  - `ycbcr -> rgb`
+- На `GTX 1650` confirmed bottleneck сейчас именно `coeffs -> ycbcr`:
+  - `gnome_4096`: total decode `18.79 ms`, из них `11.02 ms` в `coeffs -> ycbcr`
+  - `gnome_8192`: total decode `70.00 ms`, из них `45.70 ms` в `coeffs -> ycbcr`
+- Проверены ещё две гипотезы и обе оказались неперспективными:
+  - packing промежуточных `Y/Cb/Cr` planes в `uint32` по 4 байта дал сильный regression
+  - уменьшение `local_size_x` с `256` до `64` для тяжёлых `4:2:0` kernels дало практически нулевой эффект
+- После этого проверен sparsity-based fast path:
+  - naive вариант с повторным сканированием `64` coefficients в hot stage оказался плохим
+  - рабочий вариант: вычислять `all_ac_zero` флаг прямо в `entropy -> coeffs` и передавать его в `coeffs -> ycbcr`
+- Для synthetic `gnome` dataset на `GTX 1650`:
+  - `gnome_4096`: `all_ac_zero_blocks=0.7350`, decode `18.79 ms -> 13.89 ms`
+  - `gnome_8192`: `all_ac_zero_blocks=0.7650`, decode `70.00 ms -> 45.83 ms`
+  - hottest stage `coeffs -> ycbcr` сократился:
+    - `11.02 ms -> 4.90 ms` на `4096`
+    - `45.70 ms -> 17.34 ms` на `8192`
+- Correctness после этого fast path перепроверен:
+  - `GTX 1650` с validation layers: ок
+  - `Intel UHD 770` с validation layers: ок
+- Собран отдельный временный benchmark set по размерным классам:
+  - `0.26 MP`, `3.98 MP`, `4K / 8.29 MP`, `9.04 MP`, `20.86 MP`, `48.00 MP`, `64.00 MP`
+- На `GTX 1650` по этому ряду:
+  - `0.26 MP`: CPU `1.91 ms`, GPU `1.46 ms`
+  - `3.98 MP`: CPU `19.26 ms`, GPU `6.70 ms`
+  - `4K / 8.29 MP`: CPU `39.39 ms`, GPU `12.29 ms`
+  - `9.04 MP`: CPU `39.65 ms`, GPU `13.07 ms`
+  - `20.86 MP`: CPU `95.94 ms`, GPU `27.75 ms`
+  - `48.00 MP`: CPU `216.05 ms`, GPU `56.43 ms`
+  - `64.00 MP`: CPU `301.28 ms`, GPU `54.79 ms`
+- `64 MP` image оказалась быстрее `48 MP` по GPU decode за счёт высокой sparsity:
+  - `all_ac_zero_blocks=0.4218` против `0.0855`
+- `nsys` на `64 MP` подтвердил code-level timings:
+  - upload `~11.2 ms`
+  - gpu decode `~55 ms`
+  - reduce `~3.1 ms`
+  - readback `~0.14 ms`
+  - по `vulkan_api_sum` доминирует `vkWaitForFences`
+- Следующий осмысленный шаг теперь: integer IDCT именно в stage `coeffs -> ycbcr`.
 - Остался отдельный technical debt:
   - старый `vulkan.jpegDecodeBenchmark` для very large RGB images пока не даёт корректный итог из-за legacy raw-byte reduction path.
 - Подробный инженерный журнал: `docs/vulkan_jpeg_decode_benchmark.md`.
+- Дополнительно исследованы три отдельные ветки ускорения на `GTX 1650`:
+  - `integer IDCT`
+    - добавлен prototype `jpeg_decode_color_420_coeffs_to_ycbcr_int.comp`
+    - correctness плохой:
+      - `gnome_small`: `avg_abs_brightness_diff=25.41`, `avg_abs_channel_diff=27.46`
+    - speedup тоже нет:
+      - `gnome_4096`: decode `13.62 ms` против `13.30 ms` у float baseline
+  - `richer sparsity metadata`
+    - добавлены exact-path kernels с `column metadata`
+    - correctness нормальный:
+      - `gnome_small`: `avg_abs_brightness_diff=1.46`
+    - но performance хуже baseline:
+      - `gnome_4096`: `18.91 ms` против `13.30 ms`
+      - `gnome_8192`: `93.77 ms` против `46.96 ms`
+  - `less waits / batching`
+    - добавлен `GPGPU_VULKAN_JPEG_BENCH_SYNC_MODE=iteration`
+    - `gnome_4096`: decode `13.30 -> 12.19 ms`
+    - `gnome_8192`: decode `46.96 -> 45.67 ms`
+    - `nsys` на `gnome_8192`:
+      - `vkWaitForFences`: `666.88 ms / 178 calls` -> `624.57 ms / 158 calls`
+      - `vk async wait fence` NVTX total: `527.94 ms` -> `285.66 ms`
+- Текущий practical вывод:
+  - из трёх веток полезный выигрыш дала только `less waits / batching`
+  - `integer IDCT` имеет смысл продолжать только как faithful `libjpeg-style` port
+  - `richer sparsity metadata` в tested exact form оказался слишком дорогим

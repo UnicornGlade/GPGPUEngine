@@ -8,7 +8,10 @@
 #include "generated_kernels/image_interpolation_comp.h"
 #include "generated_kernels/jpeg_decode_color_420_comp.h"
 #include "generated_kernels/jpeg_decode_color_420_coeffs_to_ycbcr_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_coeffs_to_ycbcr_colmeta_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_coeffs_to_ycbcr_int_comp.h"
 #include "generated_kernels/jpeg_decode_color_420_to_coeffs_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_to_coeffs_colmeta_comp.h"
 #include "generated_kernels/jpeg_decode_color_420_to_ycbcr_comp.h"
 #include "generated_kernels/jpeg_decode_color_comp.h"
 #include "generated_kernels/jpeg_decode_grayscale_comp.h"
@@ -63,8 +66,17 @@ namespace avk2 {
 	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrKernel() {
 		return vulkan_binaries_jpeg_decode_color_420_coeffs_to_ycbcr_comp;
 	}
+	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrColmetaKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_coeffs_to_ycbcr_colmeta_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrIntKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_coeffs_to_ycbcr_int_comp;
+	}
 	const ProgramBinaries& getJpegDecodeColor420ToCoeffsKernel() {
 		return vulkan_binaries_jpeg_decode_color_420_to_coeffs_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColor420ToCoeffsColmetaKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_to_coeffs_colmeta_comp;
 	}
 	const ProgramBinaries& getJpegDecodeColor420ToYcbcrKernel() {
 		return vulkan_binaries_jpeg_decode_color_420_to_ycbcr_comp;

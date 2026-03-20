@@ -615,3 +615,403 @@ Correctness после coefficient split:
 - workgroup-cooperative IDCT;
 - более компактное представление preprocessed scan metadata;
 - optional vendor fast-path (`nvJPEG`) поверх portable fallback.
+
+## Дополнительное исследование hot stages
+
+Чтобы не оптимизировать вслепую дальше, в benchmark-path добавлены отдельные timings для стадий:
+
+- `entropy -> coeffs`
+- `coeffs -> ycbcr`
+- `ycbcr -> rgb`
+
+На `GTX 1650` именно `coeffs -> ycbcr` стабильно доминирует:
+
+- `gnome_4096`
+  - total decode: `18.79 ms`
+  - `entropy -> coeffs`: `5.86 ms`
+  - `coeffs -> ycbcr`: `11.02 ms`
+  - `ycbcr -> rgb`: `1.87 ms`
+- `gnome_8192`
+  - total decode: `70.00 ms`
+  - `entropy -> coeffs`: `17.64 ms`
+  - `coeffs -> ycbcr`: `45.70 ms`
+  - `ycbcr -> rgb`: `6.67 ms`
+
+Практический вывод:
+
+- следующий реальный bottleneck уже не Huffman path и не final RGB conversion;
+- основное время сидит в IDCT + planar write stage;
+- значит дальнейшие meaningful optimizations нужно делать именно там.
+
+### Проверенные, но неперспективные гипотезы
+
+1. Упаковка промежуточных `Y/Cb/Cr` planes по 4 байта в `uint32`
+
+- гипотеза была уменьшить inter-kernel bandwidth между `coeffs -> ycbcr` и `ycbcr -> rgb`;
+- на практике получилось хуже:
+  - `24 MP`: примерно `33.6 ms -> 101.7 ms`
+  - `64 MP`: примерно `84.9 ms -> 276.7 ms`
+- correctness не ломался, но performance regression слишком большой, поэтому подход сразу откатан.
+
+2. Уменьшение `local_size_x` с `256` до `64` для двух тяжёлых `4:2:0` kernels
+
+- A/B на том же synthetic dataset дал практически нулевой эффект:
+  - `gnome_4096`: `18.77 ms` vs `18.79 ms`
+  - `gnome_8192`: `70.06 ms` vs `70.00 ms`
+- значит workgroup-size tuning здесь не является meaningful lever и в текущем виде не даёт measurable gain.
+
+### Проверенная полезная гипотеза: zero-AC metadata из stage 1
+
+Дальше была проверена более точная версия sparsity fast-path:
+
+- сначала измерена доля блоков, у которых `all AC = 0`;
+- затем этот флаг стали вычислять прямо в `entropy -> coeffs`, где coefficients уже и так читаются;
+- в `coeffs -> ycbcr` kernel теперь читается готовый `all_ac_zero` flag и для таких блоков выполняется constant-fill по DC, без дополнительного сканирования `64` коэффициентов.
+
+Что важно:
+
+- naive version этой идеи была плохой:
+  - если заново сканировать `64` коэффициентов прямо в hot stage, становится только хуже;
+- но версия с precomputed metadata оказалась уже правильной.
+
+Измеренная sparsity на synthetic `gnome` dataset:
+
+- `gnome_4096`: `all_ac_zero_blocks=0.7350`
+- `gnome_8192`: `all_ac_zero_blocks=0.7650`
+
+Результат на `GTX 1650` после переноса флага в stage 1:
+
+- `gnome_4096`
+  - было `18.79 ms`
+  - стало `13.89 ms`
+  - `coeffs -> ycbcr`: `11.02 ms -> 4.90 ms`
+- `gnome_8192`
+  - было `70.00 ms`
+  - стало `45.83 ms`
+  - `coeffs -> ycbcr`: `45.70 ms -> 17.34 ms`
+
+Correctness после этого шага перепроверен:
+
+- `GTX 1650`, validation layers enabled: small-set correctness проходит
+- `Intel UHD 770`, validation layers enabled: small-set correctness проходит
+
+Практический вывод:
+
+- sparsity сама по себе здесь действительно полезна;
+- но metadata о sparsity нужно вычислять в том kernel-е, который уже touching coefficients, а не повторять expensive scan в следующей стадии;
+- это первый confirmed optimization после coefficient split, который даёт значимый выигрыш именно по hot stage.
+
+### Следующий осмысленный шаг
+
+Следующий practical candidate теперь выглядит так:
+
+- переписать `coeffs -> ycbcr` stage на integer IDCT;
+- по возможности сократить private state и float pressure в `idctBlock`;
+- только после этого снова сравнить timings по тем же stage markers.
+
+## Benchmark set по размерным классам
+
+Для отдельной итерации profiling/benchmark был собран временный набор в `/tmp/gpgpu_jpeg_benchmark_sizes_260321`:
+
+- `small_sipi_4.2.03.jpg`
+  - `512x512`
+  - `0.26 MP`
+  - `190020 B`
+  - источник: `https://sipi.usc.edu/database/download.php?vol=misc&img=4.2.03`
+- `mp4_first_night_mary_river.jpg`
+  - `2304x1728`
+  - `3.98 MP`
+  - `1862972 B`
+  - источник: `https://commons.wikimedia.org/wiki/Special:Redirect/file/First%20night%20at%20Mary%20River%20%289103309112%29.jpg`
+- `k4_ts_2014_12_23_2268.jpg`
+  - `3840x2160`
+  - `8.29 MP`
+  - `3462089 B`
+  - источник: `https://commons.wikimedia.org/wiki/Special:Redirect/file/TS%202014-12-23-2268%20%2815464308094%29.jpg`
+- `mp10_jpegai14_3680x2456.jpg`
+  - `3680x2456`
+  - `9.04 MP`
+  - `2958293 B`
+  - source PNG zip: `https://jpegai.github.io/public/test_set/00014_TE_3680x2456.png.zip`
+  - локально сконвертирован в JPEG для benchmark
+- `mp20_namwon_nongak.jpg`
+  - `5594x3729`
+  - `20.86 MP`
+  - `5010202 B`
+  - источник: `https://commons.wikimedia.org/wiki/Special:Redirect/file/%EB%82%A8%EC%9B%90%EB%86%8D%EC%95%85.jpg`
+- `mp40_vaz_2109_8000x6000.jpg`
+  - `8000x6000`
+  - `48.00 MP`
+  - `18334341 B`
+  - источник: `https://commons.wikimedia.org/wiki/Special:Redirect/file/VAZ%202109%208000x6000.jpg`
+- `mp60_earth_from_orbit_8000x8000.jpg`
+  - `8000x8000`
+  - `64.00 MP`
+  - `17224423 B`
+  - источник: `https://svs.gsfc.nasa.gov/vis/a010000/a011200/a011268/cover-original.jpg`
+
+## GTX 1650 benchmark на размерном ряду
+
+Benchmark path:
+
+- `GPGPU_VISIBLE_DEVICES=3`
+- `AVK_ENABLE_VALIDATION_LAYERS=false`
+- `vulkan.jpegDecodeBenchmarkGpuColor`
+
+Для apples-to-apples CPU comparison отдельно замерялся decode из памяти тех же generated `*_rgb_420_rst1_q95.jpg`, которые benchmark отправляет на GPU.
+
+Результаты:
+
+- `0.26 MP`, `512x512`, `all_ac_zero_blocks=0.0000`
+  - CPU decode: `1.91 ms`
+  - GPU decode: `1.46 ms`
+  - upload: `1.70 ms`
+  - reduce: `0.12 ms`
+  - readback: `0.05 ms`
+- `3.98 MP`, `2304x1728`, `all_ac_zero_blocks=0.0383`
+  - CPU decode: `19.26 ms`
+  - GPU decode: `6.70 ms`
+  - upload: `3.28 ms`
+  - reduce: `0.61 ms`
+  - readback: `0.20 ms`
+- `8.29 MP (4K)`, `3840x2160`, `all_ac_zero_blocks=0.0258`
+  - CPU decode: `39.39 ms`
+  - GPU decode: `12.29 ms`
+  - upload: `4.18 ms`
+  - reduce: `0.80 ms`
+  - readback: `0.27 ms`
+- `9.04 MP`, `3680x2456`, `all_ac_zero_blocks=0.0471`
+  - CPU decode: `39.65 ms`
+  - GPU decode: `13.07 ms`
+  - upload: `4.17 ms`
+  - reduce: `0.81 ms`
+  - readback: `0.28 ms`
+- `20.86 MP`, `5594x3729`, `all_ac_zero_blocks=0.0349`
+  - CPU decode: `95.94 ms`
+  - GPU decode: `27.75 ms`
+  - upload: `5.55 ms`
+  - reduce: `1.30 ms`
+  - readback: `0.35 ms`
+- `48.00 MP`, `8000x6000`, `all_ac_zero_blocks=0.0855`
+  - CPU decode: `216.05 ms`
+  - GPU decode: `56.43 ms`
+  - upload: `9.08 ms`
+  - reduce: `2.41 ms`
+  - readback: `0.36 ms`
+- `64.00 MP`, `8000x8000`, `all_ac_zero_blocks=0.4218`
+  - CPU decode: `301.28 ms`
+  - GPU decode: `54.79 ms`
+  - upload: `11.05 ms`
+  - reduce: `3.06 ms`
+  - readback: `0.28 ms`
+
+Практические наблюдения:
+
+- GPU decode уже быстрее CPU на всём диапазоне, кроме совсем маленького `512x512`, где разница несущественная.
+- Самый большой выигрыш получается там, где у image много `all_ac_zero` blocks:
+  - `64 MP` Earth image оказался быстрее `48 MP` VAZ image, хотя пикселей больше.
+- Это подтверждает, что content/sparsity для JPEG decode сейчас важны почти так же, как и pure pixel count.
+
+## `nsys` profile на `64 MP`
+
+Отдельно был снят `nsys` trace на `mp60_earth_from_orbit_8000x8000.jpg`.
+
+Code-level timings:
+
+- upload: `11.29 ms`
+- GPU decode: `55.05 ms`
+  - `entropy -> coeffs`: `24.47 ms`
+  - `coeffs -> ycbcr`: `24.18 ms`
+  - `ycbcr -> rgb`: `6.36 ms`
+- reduce: `3.16 ms`
+- readback: `0.14 ms`
+
+`nsys` `nvtx_sum` подтверждает ту же картину:
+
+- `jpeg gpu decode color`: median `54.91 ms`
+- `jpeg gpu upload compressed color`: median `11.23 ms`
+- `jpeg gpu brightness reduce color`: median `3.14 ms`
+- `jpeg gpu brightness readback color`: median `0.14 ms`
+
+`nsys` `vulkan_api_sum`:
+
+- `vkWaitForFences`: `742.30 ms`, `83.4%` API времени
+- `vkQueueSubmit`: `6.25 ms`
+- `vkAllocateMemory`: `12.02 ms`
+- `vkFreeMemory`: `8.88 ms`
+
+Интерпретация:
+
+- profiling хорошо согласуется с code-level timers;
+- главный runtime cost всё ещё внутри compute stages, а не в upload/readback;
+- но на уровне Vulkan API очень хорошо видно, что test/benchmark orchestration намеренно тратит много wall-clock в `vkWaitForFences`;
+- для реального throughput path следующий большой engineering reserve — меньше синхронизаций и больше batching/pipelining между dispatch-ами и image iterations.
+
+## Следующие practical ideas
+
+После этого profiling шага наиболее реалистичные идеи такие:
+
+1. Integer IDCT в `coeffs -> ycbcr`
+
+- это всё ещё главный hot stage почти на всех content classes;
+- float-heavy IDCT с большими private arrays выглядит как основной compute bottleneck.
+
+2. Richer sparsity metadata из `entropy -> coeffs`
+
+- `all_ac_zero` уже дал хороший выигрыш;
+- следующий шаг может быть:
+  - `last_nonzero_idx`
+  - или несколько coarse sparsity classes
+- это позволит делать не только DC-only shortcut, но и более дешёвые reduced IDCT variants для “почти пустых” blocks.
+
+3. Меньше forced waits в benchmark/throughput path
+
+- `vkWaitForFences` доминирует API time;
+- для реального pipeline имеет смысл:
+  - собирать несколько dispatch stages в один async batch;
+  - readback делать реже;
+  - мерить throughput отдельно от fully-synchronized per-stage latency.
+
+4. Подумать о fuse между `coeffs -> ycbcr` и `ycbcr -> rgb` только после integer IDCT
+
+- сейчас split полезен для observability и occupancy;
+- blind fusion делать рано;
+- но после удешевления IDCT стоит перепроверить, не станет ли planar write/read уже заметным bottleneck.
+
+## Исследование трёх запланированных ускорений
+
+На этом шаге были исследованы три отдельные ветки:
+
+1. `integer IDCT`
+2. `richer sparsity metadata`
+3. `less waits / batching`
+
+### `integer IDCT`
+
+Для проверки был добавлен отдельный experimental kernel `jpeg_decode_color_420_coeffs_to_ycbcr_int.comp`.
+
+На `GTX 1650` он оказался непригодным в текущем виде:
+
+- correctness:
+  - `gnome_small`
+  - `avg_abs_brightness_diff=25.411930`
+  - `max_abs_brightness_diff=230.333333`
+  - `avg_abs_channel_diff=27.460686`
+  - `max_abs_channel_diff=250`
+- benchmark:
+  - `gnome_4096`
+  - float baseline decode `13.30 ms`
+  - integer prototype decode `13.62 ms`
+  - float `coeffs -> ycbcr` `4.82 ms`
+  - integer prototype `coeffs -> ycbcr` `5.13 ms`
+
+Вывод:
+
+- наивный fixed-point port текущего float butterfly не дал speedup;
+- correctness у него сильно хуже допустимого;
+- если продолжать эту ветку, то уже нужен не approximate port, а более faithful перенос `libjpeg/jidctint`-style integer IDCT с точной схемой shifts/consts.
+
+### `richer sparsity metadata`
+
+Для проверки был добавлен отдельный exact-path:
+
+- `jpeg_decode_color_420_to_coeffs_colmeta.comp`
+- `jpeg_decode_color_420_coeffs_to_ycbcr_colmeta.comp`
+
+Он передаёт из `entropy -> coeffs` две bitmap metadata:
+
+- `nonzero_col_mask`
+- `nonzero_rows_gt0_col_mask`
+
+И использует их для двух exact shortcuts:
+
+- полностью нулевые natural columns
+- columns, где активен только `row0`
+
+Correctness у этого варианта нормальный:
+
+- `gnome_small`
+  - `avg_abs_brightness_diff=1.459403`
+  - `max_abs_brightness_diff=3.666667`
+  - `avg_abs_channel_diff=1.575076`
+  - `max_abs_channel_diff=12`
+
+Но performance получился хуже baseline:
+
+- `gnome_4096`
+  - baseline decode `13.30 ms`
+  - `colmeta` decode `18.91 ms`
+  - baseline `coeffs -> ycbcr` `4.82 ms`
+  - `colmeta` `coeffs -> ycbcr` `8.62 ms`
+- `gnome_8192`
+  - baseline decode `46.96 ms`
+  - `colmeta` decode `93.77 ms`
+  - baseline `coeffs -> ycbcr` `17.60 ms`
+  - `colmeta` `coeffs -> ycbcr` `46.56 ms`
+
+Вывод:
+
+- richer metadata сама по себе не даёт выигрыша;
+- в tested exact form overhead от bookkeeping и branchy stage 2 оказался дороже, чем выигрыш от skipped columns.
+
+### `less waits / batching`
+
+Для benchmark path был добавлен второй orchestration mode:
+
+- `GPGPU_VULKAN_JPEG_BENCH_SYNC_MODE=stage`
+  - старый режим
+  - wait после каждой decode sub-stage
+- `GPGPU_VULKAN_JPEG_BENCH_SYNC_MODE=iteration`
+  - stage1/stage2/stage3 отправляются подряд
+  - один wait на весь decode итерации
+
+На `GTX 1650`:
+
+- `gnome_4096`
+  - `stage`: decode `13.30 ms`
+  - `iteration`: decode `12.19 ms`
+- `gnome_8192`
+  - `stage`: decode `46.96 ms`
+  - `iteration`: decode `45.67 ms`
+
+То есть выигрыш умеренный, но реальный.
+
+Для `gnome_8192` отдельно снят `nsys`:
+
+- `.local_data/nsys_profiles/jpeg_gnome8192_stage.*`
+- `.local_data/nsys_profiles/jpeg_gnome8192_iteration.*`
+
+`vulkan_api_sum`:
+
+- `stage`
+  - `vkWaitForFences`: `666.88 ms`, `178` calls
+- `iteration`
+  - `vkWaitForFences`: `624.57 ms`, `158` calls
+
+`nvtx_sum`:
+
+- `stage`
+  - `jpeg gpu decode color`: total `469.15 ms`, median `46.80 ms`
+  - `vk async wait fence`: total `527.94 ms`
+- `iteration`
+  - `jpeg gpu decode color`: total `460.61 ms`, median `46.03 ms`
+  - `vk async wait fence`: total `285.66 ms`
+
+Вывод:
+
+- batching/fewer waits действительно уменьшают host-side synchronization overhead;
+- но основной bottleneck всё ещё остаётся в compute stages, а не в orchestration.
+
+## Итог по трём веткам
+
+На текущем шаге практический результат такой:
+
+- `integer IDCT`: пока отрицательный результат
+- `richer sparsity metadata`: тоже отрицательный результат в tested exact form
+- `less waits / batching`: единственный вариант из трёх, который дал чистый и полезный выигрыш
+
+Следующие разумные шаги после этого исследования:
+
+1. Если продолжать `integer IDCT`, то только как faithful `libjpeg-style` port.
+2. Если продолжать `sparsity`, то искать metadata, которая открывает более coarse shortcut, а не per-column micro-branching.
+3. Если продолжать `batching`, то идти дальше к batching нескольких image iterations с более редким readback.
