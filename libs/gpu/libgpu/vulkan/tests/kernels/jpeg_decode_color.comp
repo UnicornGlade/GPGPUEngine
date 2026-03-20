@@ -1,0 +1,445 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+
+layout (std430, binding = 0) readonly buffer DcLutsIn {
+	uint dc_luts[];
+};
+
+layout (std430, binding = 1) readonly buffer AcLutsIn {
+	uint ac_luts[];
+};
+
+layout (std430, binding = 2) readonly buffer QuantTablesIn {
+	uint quant_tables[];
+};
+
+layout (std430, binding = 3) readonly buffer ScanDataIn {
+	uint scan_data[];
+};
+
+layout (std430, binding = 4) readonly buffer StartPositionsIn {
+	uint start_positions[];
+};
+
+layout (std430, binding = 5) writeonly buffer OutputPixelsOut {
+	uint output_pixels[];
+};
+
+layout (push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint mcu_width;
+	uint mcu_height;
+	uint mcus_x;
+	uint total_mcus;
+	uint hmax;
+	uint vmax;
+	uint comp0_h;
+	uint comp0_v;
+	uint comp1_h;
+	uint comp1_v;
+	uint comp2_h;
+	uint comp2_v;
+	uint comp0_qtable;
+	uint comp1_qtable;
+	uint comp2_qtable;
+	uint comp0_dc_table;
+	uint comp0_ac_table;
+	uint comp1_dc_table;
+	uint comp1_ac_table;
+	uint comp2_dc_table;
+	uint comp2_ac_table;
+} params;
+
+const float SCALE[8] = float[](
+	1.0, 1.387039845, 1.306562965, 1.175875602,
+	1.0, 0.785694958, 0.541196100, 0.275899379
+);
+
+const uint ZIGZAG[64] = uint[](
+	 0u,  1u,  5u,  6u, 14u, 15u, 27u, 28u,
+	 2u,  4u,  7u, 13u, 16u, 26u, 29u, 42u,
+	 3u,  8u, 12u, 17u, 25u, 30u, 41u, 43u,
+	 9u, 11u, 18u, 24u, 31u, 40u, 44u, 53u,
+	10u, 19u, 23u, 32u, 39u, 45u, 52u, 54u,
+	20u, 22u, 33u, 38u, 46u, 51u, 55u, 60u,
+	21u, 34u, 37u, 47u, 50u, 56u, 59u, 61u,
+	35u, 36u, 48u, 49u, 57u, 58u, 62u, 63u
+);
+
+struct BitStreamState {
+	uint next_word;
+	uint cur;
+	uint next;
+	uint left;
+};
+
+uint compH(uint comp)
+{
+	if (comp == 0u) {
+		return params.comp0_h;
+	}
+	if (comp == 1u) {
+		return params.comp1_h;
+	}
+	return params.comp2_h;
+}
+
+uint compV(uint comp)
+{
+	if (comp == 0u) {
+		return params.comp0_v;
+	}
+	if (comp == 1u) {
+		return params.comp1_v;
+	}
+	return params.comp2_v;
+}
+
+uint compQTable(uint comp)
+{
+	if (comp == 0u) {
+		return params.comp0_qtable;
+	}
+	if (comp == 1u) {
+		return params.comp1_qtable;
+	}
+	return params.comp2_qtable;
+}
+
+uint compDcTable(uint comp)
+{
+	if (comp == 0u) {
+		return params.comp0_dc_table;
+	}
+	if (comp == 1u) {
+		return params.comp1_dc_table;
+	}
+	return params.comp2_dc_table;
+}
+
+uint compAcTable(uint comp)
+{
+	if (comp == 0u) {
+		return params.comp0_ac_table;
+	}
+	if (comp == 1u) {
+		return params.comp1_ac_table;
+	}
+	return params.comp2_ac_table;
+}
+
+uint compBlockBase(uint comp)
+{
+	if (comp == 0u) {
+		return 0u;
+	}
+	if (comp == 1u) {
+		return params.comp0_h * params.comp0_v;
+	}
+	return params.comp0_h * params.comp0_v + params.comp1_h * params.comp1_v;
+}
+
+uint zigzag(uint pos)
+{
+	return ZIGZAG[pos];
+}
+
+void refill(inout BitStreamState state)
+{
+	if (state.left < 32u) {
+		uint w = scan_data[state.next_word];
+		w = (w & 0x000000ffu) << 24u
+		  | (w & 0x0000ff00u) << 8u
+		  | (w & 0x00ff0000u) >> 8u
+		  | (w & 0xff000000u) >> 24u;
+		state.next_word += 1u;
+		state.cur |= w >> state.left;
+		state.next = (w << 1u) << (31u - state.left);
+		state.left += 32u;
+	}
+}
+
+void consume(inout BitStreamState state, uint n)
+{
+	if (n == 0u) {
+		return;
+	}
+	state.cur <<= n;
+	state.cur |= (state.next >> 1u) >> (31u - n);
+	state.next <<= n;
+	state.left -= n;
+}
+
+uint peek(BitStreamState state, uint n)
+{
+	if (n == 0u) {
+		return 0u;
+	}
+	return (state.cur >> 1u) >> (31u - n);
+}
+
+uint huffdecode(inout BitStreamState state, uint lut_base)
+{
+	refill(state);
+	uint code = peek(state, 16u);
+	uint entry = lut_base == 0xffffffffu ? 0xffffffffu : dc_luts[0];
+	entry = 0xffffffffu;
+	if (lut_base != 0xffffffffu) {
+		entry = (lut_base < (4u * 65536u)) ? dc_luts[lut_base + code] : ac_luts[lut_base - 4u * 65536u + code];
+	}
+	rassert(entry != 0xffffffffu, 211041u);
+	consume(state, entry >> 8u);
+	return entry & 0xffu;
+}
+
+uint huffdecodeDc(inout BitStreamState state, uint table_selector)
+{
+	refill(state);
+	uint code = peek(state, 16u);
+	uint entry = dc_luts[table_selector * 65536u + code];
+	rassert(entry != 0xffffffffu, 211041u);
+	consume(state, entry >> 8u);
+	return entry & 0xffu;
+}
+
+uint huffdecodeAc(inout BitStreamState state, uint table_selector)
+{
+	refill(state);
+	uint code = peek(state, 16u);
+	uint entry = ac_luts[table_selector * 65536u + code];
+	rassert(entry != 0xffffffffu, 211041u);
+	consume(state, entry >> 8u);
+	return entry & 0xffu;
+}
+
+int huffExtend(int v, uint t)
+{
+	if (t == 0u) {
+		return 0;
+	}
+	int vt = 1 << int(t - 1u);
+	if (v < vt) {
+		return v + ((-1) << int(t)) + 1;
+	}
+	return v;
+}
+
+void decodeBlock(inout BitStreamState state,
+				 uint dc_table_selector,
+				 uint ac_table_selector,
+				 uint qtable_selector,
+				 inout int dc_predictor,
+				 out int coeffs[64])
+{
+	for (uint i = 0u; i < 64u; ++i) {
+		coeffs[i] = 0;
+	}
+
+	uint dccat = huffdecodeDc(state, dc_table_selector);
+	refill(state);
+	int diff = int(peek(state, dccat));
+	consume(state, dccat);
+	dc_predictor += huffExtend(diff, dccat);
+	coeffs[0] = dc_predictor * int(quant_tables[qtable_selector * 64u + 0u]);
+
+	for (uint pos = 1u; pos < 64u; ++pos) {
+		uint rrrrssss = huffdecodeAc(state, ac_table_selector);
+		if (rrrrssss == 0u) {
+			break;
+		}
+		if (rrrrssss == 0xf0u) {
+			pos += 15u;
+			continue;
+		}
+
+		uint run = rrrrssss >> 4u;
+		uint ssss = rrrrssss & 0x0fu;
+		pos += run;
+		if (pos >= 64u) {
+			break;
+		}
+
+		refill(state);
+		int value = int(peek(state, ssss));
+		consume(state, ssss);
+		coeffs[pos] = huffExtend(value, ssss) * int(quant_tables[qtable_selector * 64u + pos]);
+	}
+}
+
+void idctBlock(const int coeffs[64], inout float pixels[12u * 64u], uint block_index)
+{
+	float stage[64];
+
+	for (uint col = 0u; col < 8u; ++col) {
+		float inputs[8];
+		for (uint row = 0u; row < 8u; ++row) {
+			inputs[row] = float(coeffs[zigzag(row * 8u + col)]) * SCALE[row] * SCALE[col];
+		}
+
+		float tmp0 = inputs[0] * 0.125;
+		float tmp1 = inputs[2] * 0.125;
+		float tmp2 = inputs[4] * 0.125;
+		float tmp3 = inputs[6] * 0.125;
+
+		float tmp10 = tmp0 + tmp2;
+		float tmp11 = tmp0 - tmp2;
+		float tmp13 = tmp1 + tmp3;
+		float tmp12 = (tmp1 - tmp3) * 1.414213562 - tmp13;
+
+		float out0 = tmp10 + tmp13;
+		float out3 = tmp10 - tmp13;
+		float out1 = tmp11 + tmp12;
+		float out2 = tmp11 - tmp12;
+
+		float tmp4 = inputs[1] * 0.125;
+		float tmp5 = inputs[3] * 0.125;
+		float tmp6 = inputs[5] * 0.125;
+		float tmp7 = inputs[7] * 0.125;
+
+		float z13 = tmp6 + tmp5;
+		float z10 = tmp6 - tmp5;
+		float z11 = tmp4 + tmp7;
+		float z12 = tmp4 - tmp7;
+
+		float out7 = z11 + z13;
+		float tmp11i = (z11 - z13) * 1.414213562;
+
+		float z5 = (z10 + z12) * 1.847759065;
+		float tmp10i = z5 - z12 * 1.082392200;
+		float tmp12i = z5 - z10 * 2.613125930;
+
+		float out6 = tmp12i - out7;
+		float out5 = tmp11i - out6;
+		float out4 = tmp10i - out5;
+
+		stage[0u * 8u + col] = out0 + out7;
+		stage[7u * 8u + col] = out0 - out7;
+		stage[1u * 8u + col] = out1 + out6;
+		stage[6u * 8u + col] = out1 - out6;
+		stage[2u * 8u + col] = out2 + out5;
+		stage[5u * 8u + col] = out2 - out5;
+		stage[3u * 8u + col] = out3 + out4;
+		stage[4u * 8u + col] = out3 - out4;
+	}
+
+	uint pixel_base = block_index * 64u;
+	for (uint row = 0u; row < 8u; ++row) {
+		float z5 = stage[row * 8u + 0u] + 128.5;
+		float tmp10 = z5 + stage[row * 8u + 4u];
+		float tmp11 = z5 - stage[row * 8u + 4u];
+		float tmp13 = stage[row * 8u + 2u] + stage[row * 8u + 6u];
+		float tmp12 = (stage[row * 8u + 2u] - stage[row * 8u + 6u]) * 1.414213562 - tmp13;
+
+		float out0 = tmp10 + tmp13;
+		float out3 = tmp10 - tmp13;
+		float out1 = tmp11 + tmp12;
+		float out2 = tmp11 - tmp12;
+
+		float z13 = stage[row * 8u + 5u] + stage[row * 8u + 3u];
+		float z10 = stage[row * 8u + 5u] - stage[row * 8u + 3u];
+		float z11 = stage[row * 8u + 1u] + stage[row * 8u + 7u];
+		float z12 = stage[row * 8u + 1u] - stage[row * 8u + 7u];
+
+		float out7 = z11 + z13;
+		float tmp11i = (z11 - z13) * 1.414213562;
+		float z5i = (z10 + z12) * 1.847759065;
+		float tmp10i = z5i - z12 * 1.082392200;
+		float tmp12i = z5i - z10 * 2.613125930;
+
+		float out6 = tmp12i - out7;
+		float out5 = tmp11i - out6;
+		float out4 = tmp10i - out5;
+
+		pixels[pixel_base + row * 8u + 0u] = clamp(out0 + out7, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 7u] = clamp(out0 - out7, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 1u] = clamp(out1 + out6, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 6u] = clamp(out1 - out6, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 2u] = clamp(out2 + out5, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 5u] = clamp(out2 - out5, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 3u] = clamp(out3 + out4, 0.0, 255.0);
+		pixels[pixel_base + row * 8u + 4u] = clamp(out3 - out4, 0.0, 255.0);
+	}
+}
+
+float sampleComponent(const float pixels[12u * 64u], uint comp, uint local_x, uint local_y)
+{
+	uint h = compH(comp);
+	uint v = compV(comp);
+	uint sample_x = (local_x * h) / params.hmax;
+	uint sample_y = (local_y * v) / params.vmax;
+	uint block_x = sample_x / 8u;
+	uint block_y = sample_y / 8u;
+	uint inblock_x = sample_x % 8u;
+	uint inblock_y = sample_y % 8u;
+	uint block_index = compBlockBase(comp) + block_y * h + block_x;
+	return pixels[block_index * 64u + inblock_y * 8u + inblock_x];
+}
+
+void main()
+{
+	uint mcu = workSize2DTo1D(gl_GlobalInvocationID);
+	if (mcu >= params.total_mcus) {
+		return;
+	}
+
+	BitStreamState state;
+	state.next_word = start_positions[mcu];
+	state.cur = 0u;
+	state.next = 0u;
+	state.left = 0u;
+
+	float block_pixels[12u * 64u];
+	int coeffs[64];
+	int dc_predictors[3] = int[](0, 0, 0);
+
+	for (uint comp = 0u; comp < 3u; ++comp) {
+		uint block_base = compBlockBase(comp);
+		for (uint block_y = 0u; block_y < compV(comp); ++block_y) {
+			for (uint block_x = 0u; block_x < compH(comp); ++block_x) {
+				uint block_index = block_base + block_y * compH(comp) + block_x;
+				decodeBlock(state,
+							compDcTable(comp),
+							compAcTable(comp),
+							compQTable(comp),
+							dc_predictors[comp],
+							coeffs);
+				idctBlock(coeffs, block_pixels, block_index);
+			}
+		}
+	}
+
+	uint mcu_x = mcu % params.mcus_x;
+	uint mcu_y = mcu / params.mcus_x;
+	uint base_x = mcu_x * params.mcu_width;
+	uint base_y = mcu_y * params.mcu_height;
+
+	for (uint local_y = 0u; local_y < params.mcu_height; ++local_y) {
+		uint y = base_y + local_y;
+		if (y >= params.height) {
+			continue;
+		}
+		for (uint local_x = 0u; local_x < params.mcu_width; ++local_x) {
+			uint x = base_x + local_x;
+			if (x >= params.width) {
+				continue;
+			}
+
+			float y_value = sampleComponent(block_pixels, 0u, local_x, local_y);
+			float cb_value = sampleComponent(block_pixels, 1u, local_x, local_y) - 128.0;
+			float cr_value = sampleComponent(block_pixels, 2u, local_x, local_y) - 128.0;
+
+			uint r = uint(clamp(y_value + 1.402000 * cr_value, 0.0, 255.0) + 0.5);
+			uint g = uint(clamp(y_value - 0.344136 * cb_value - 0.714136 * cr_value, 0.0, 255.0) + 0.5);
+			uint b = uint(clamp(y_value + 1.772000 * cb_value, 0.0, 255.0) + 0.5);
+
+			uint dst_index = y * params.width + x;
+			output_pixels[dst_index] = r | (g << 8u) | (b << 16u);
+		}
+	}
+}

@@ -81,6 +81,9 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/atomic_add_test.cpp
         libgpu/vulkan/tests/batched_binary_search_test.cpp
         libgpu/vulkan/tests/buffers_magic_guards_test.cpp
+        libgpu/vulkan/tests/jpeg_decode_benchmark_test.cpp
+        libgpu/vulkan/tests/jpeg_decode_gpu_test.cpp
+        libgpu/vulkan/tests/jpeg_decode_gpu_color_test.cpp
         libgpu/vulkan/tests/image_conversion_from_float_to_T_test.cpp
         libgpu/vulkan/tests/interpolation_test.cpp
         libgpu/vulkan/tests/pipeline_cache_test.cpp
@@ -235,6 +238,16 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/aplusb.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/atomic_add.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/batched_binary_search.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/fill_buffer_with_zeros.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420_coeffs_to_ycbcr.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420_to_coeffs.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420_to_ycbcr.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_grayscale.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_packed_rgb8_to_u32.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_u8_to_u32.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_u32_to_u32.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/ycbcr420_to_rgb.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.vert VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize_blending.frag VULKAN_DEFINES)
@@ -251,6 +264,7 @@ compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_interpolation
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_conversion_from_float_to_T.comp VULKAN_DEFINES TEMPLATE_DEFINES_TYPES TEMPLATE_SUFFIXES_TYPES)
 
 find_package(Vulkan REQUIRED)
+find_package(JPEG REQUIRED)
 
 if (GPU_CUDA_SUPPORT)
     set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
@@ -276,7 +290,7 @@ add_executable (${PROJECT_NAME}_test ${HEADERS_TEST} ${SOURCES_TEST})
 if (GPU_CUDA_SUPPORT)
     set_target_properties(${PROJECT_NAME}_test PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
 endif ()
-target_link_libraries (${PROJECT_NAME}_test ${LIBRARIES} ${GTEST_BOTH_LIBRARIES} ${CMAKE_DL_LIBS})
+target_link_libraries (${PROJECT_NAME}_test ${LIBRARIES} ${GTEST_BOTH_LIBRARIES} ${CMAKE_DL_LIBS} JPEG::JPEG)
 add_test(NAME ${PROJECT_NAME}_test COMMAND ${PROJECT_NAME}_test)
 if (GPU_CUDA_SUPPORT)
     target_include_directories(${PROJECT_NAME}_test PRIVATE ${CUDAToolkit_INCLUDE_DIRS})

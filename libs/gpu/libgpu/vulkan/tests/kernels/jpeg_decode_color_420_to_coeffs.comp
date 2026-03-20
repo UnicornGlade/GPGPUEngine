@@ -1,0 +1,148 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+
+layout (std430, binding = 0) readonly buffer DcLutsIn { uint dc_luts[]; };
+layout (std430, binding = 1) readonly buffer AcLutsIn { uint ac_luts[]; };
+layout (std430, binding = 2) readonly buffer QuantTablesIn { uint quant_tables[]; };
+layout (std430, binding = 3) readonly buffer ScanDataIn { uint scan_data[]; };
+layout (std430, binding = 4) readonly buffer StartPositionsIn { uint start_positions[]; };
+layout (std430, binding = 5) writeonly buffer CoeffsOut { int coeffs_out[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint total_mcus;
+	uint y_qtable;
+	uint cb_qtable;
+	uint cr_qtable;
+	uint y_dc_table;
+	uint y_ac_table;
+	uint cb_dc_table;
+	uint cb_ac_table;
+	uint cr_dc_table;
+	uint cr_ac_table;
+} params;
+
+struct BitStreamState {
+	uint next_word;
+	uint cur;
+	uint next;
+	uint left;
+};
+
+void refill(inout BitStreamState state)
+{
+	if (state.left < 32u) {
+		uint w = scan_data[state.next_word];
+		w = (w & 0x000000ffu) << 24u
+		  | (w & 0x0000ff00u) << 8u
+		  | (w & 0x00ff0000u) >> 8u
+		  | (w & 0xff000000u) >> 24u;
+		state.next_word += 1u;
+		state.cur |= w >> state.left;
+		state.next = (w << 1u) << (31u - state.left);
+		state.left += 32u;
+	}
+}
+
+void consume(inout BitStreamState state, uint n)
+{
+	if (n == 0u) return;
+	state.cur <<= n;
+	state.cur |= (state.next >> 1u) >> (31u - n);
+	state.next <<= n;
+	state.left -= n;
+}
+
+uint peek(BitStreamState state, uint n)
+{
+	if (n == 0u) return 0u;
+	return (state.cur >> 1u) >> (31u - n);
+}
+
+uint huffdecodeDc(inout BitStreamState state, uint table_selector)
+{
+	refill(state);
+	uint code = peek(state, 16u);
+	uint entry = dc_luts[table_selector * 65536u + code];
+	rassert(entry != 0xffffffffu, 211041u);
+	consume(state, entry >> 8u);
+	return entry & 0xffu;
+}
+
+uint huffdecodeAc(inout BitStreamState state, uint table_selector)
+{
+	refill(state);
+	uint code = peek(state, 16u);
+	uint entry = ac_luts[table_selector * 65536u + code];
+	rassert(entry != 0xffffffffu, 211041u);
+	consume(state, entry >> 8u);
+	return entry & 0xffu;
+}
+
+int huffExtend(int v, uint t)
+{
+	if (t == 0u) return 0;
+	int vt = 1 << int(t - 1u);
+	if (v < vt) return v + ((-1) << int(t)) + 1;
+	return v;
+}
+
+void decodeBlock(inout BitStreamState state, uint dc_table_selector, uint ac_table_selector, uint qtable_selector, inout int dc_predictor, out int coeffs[64])
+{
+	for (uint i = 0u; i < 64u; ++i) coeffs[i] = 0;
+	uint dccat = huffdecodeDc(state, dc_table_selector);
+	refill(state);
+	int diff = int(peek(state, dccat));
+	consume(state, dccat);
+	dc_predictor += huffExtend(diff, dccat);
+	coeffs[0] = dc_predictor * int(quant_tables[qtable_selector * 64u]);
+	for (uint pos = 1u; pos < 64u; ++pos) {
+		uint rrrrssss = huffdecodeAc(state, ac_table_selector);
+		if (rrrrssss == 0u) break;
+		if (rrrrssss == 0xf0u) { pos += 15u; continue; }
+		uint run = rrrrssss >> 4u;
+		uint ssss = rrrrssss & 0x0fu;
+		pos += run;
+		if (pos >= 64u) break;
+		refill(state);
+		int value = int(peek(state, ssss));
+		consume(state, ssss);
+		coeffs[pos] = huffExtend(value, ssss) * int(quant_tables[qtable_selector * 64u + pos]);
+	}
+}
+
+void storeBlock(uint mcu, uint block, const int coeffs[64])
+{
+	uint base = (mcu * 6u + block) * 64u;
+	for (uint i = 0u; i < 64u; ++i) coeffs_out[base + i] = coeffs[i];
+}
+
+void main()
+{
+	uint mcu = workSize2DTo1D(gl_GlobalInvocationID);
+	if (mcu >= params.total_mcus) return;
+
+	BitStreamState state;
+	state.next_word = start_positions[mcu];
+	state.cur = 0u;
+	state.next = 0u;
+	state.left = 0u;
+
+	int coeffs[64];
+	int y_dc = 0;
+	int cb_dc = 0;
+	int cr_dc = 0;
+
+	for (uint block = 0u; block < 4u; ++block) {
+		decodeBlock(state, params.y_dc_table, params.y_ac_table, params.y_qtable, y_dc, coeffs);
+		storeBlock(mcu, block, coeffs);
+	}
+	decodeBlock(state, params.cb_dc_table, params.cb_ac_table, params.cb_qtable, cb_dc, coeffs);
+	storeBlock(mcu, 4u, coeffs);
+	decodeBlock(state, params.cr_dc_table, params.cr_ac_table, params.cr_qtable, cr_dc, coeffs);
+	storeBlock(mcu, 5u, coeffs);
+}

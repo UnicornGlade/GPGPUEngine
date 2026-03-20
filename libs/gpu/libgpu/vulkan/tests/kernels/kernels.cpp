@@ -6,6 +6,12 @@
 #include "generated_kernels/fill_buffer_with_zeros_comp.h"
 #include "generated_kernels/image_conversion_from_float_to_T_comp.h"
 #include "generated_kernels/image_interpolation_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_coeffs_to_ycbcr_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_to_coeffs_comp.h"
+#include "generated_kernels/jpeg_decode_color_420_to_ycbcr_comp.h"
+#include "generated_kernels/jpeg_decode_color_comp.h"
+#include "generated_kernels/jpeg_decode_grayscale_comp.h"
 #include "generated_kernels/radix_sort_01_local_counting_comp.h"
 #include "generated_kernels/radix_sort_01_local_counting_portable_comp.h"
 #include "generated_kernels/radix_sort_02_global_prefixes_scan_sum_reduction_comp.h"
@@ -17,7 +23,11 @@
 #include "generated_kernels/rasterize_frag.h"
 #include "generated_kernels/rasterize_vert.h"
 #include "generated_kernels/rasterize_blending_frag.h"
+#include "generated_kernels/reduce_sum_packed_rgb8_to_u32_comp.h"
+#include "generated_kernels/reduce_sum_u8_to_u32_comp.h"
+#include "generated_kernels/reduce_sum_u32_to_u32_comp.h"
 #include "generated_kernels/write_value_at_index_comp.h"
+#include "generated_kernels/ycbcr420_to_rgb_comp.h"
 
 #include <libgpu/vulkan/vk/common_host.h>
 
@@ -46,6 +56,24 @@ namespace avk2 {
 		std::string type_name = to_string(nchannels) + "x" + toupper(typeName(type));
 		rassert(vulkan_binaries_image_interpolation.count(type_name) > 0, 770673198, type_name);
 		return *vulkan_binaries_image_interpolation[type_name];
+	}
+	const ProgramBinaries& getJpegDecodeColor420Kernel() {
+		return vulkan_binaries_jpeg_decode_color_420_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColor420CoeffsToYcbcrKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_coeffs_to_ycbcr_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColor420ToCoeffsKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_to_coeffs_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColor420ToYcbcrKernel() {
+		return vulkan_binaries_jpeg_decode_color_420_to_ycbcr_comp;
+	}
+	const ProgramBinaries& getJpegDecodeColorKernel() {
+		return vulkan_binaries_jpeg_decode_color_comp;
+	}
+	const ProgramBinaries& getJpegDecodeGrayscaleKernel() {
+		return vulkan_binaries_jpeg_decode_grayscale_comp;
 	}
 	const ProgramBinaries& getRadixSort01LocalCountingKernel() {
 		return vulkan_binaries_radix_sort_01_local_counting_comp;
@@ -77,7 +105,19 @@ namespace avk2 {
 	std::vector<const ProgramBinaries*> getRasterizeWithBlendingKernel() {
 		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_blending_frag};
 	}
+	const ProgramBinaries& getReduceSumPackedRgb8ToU32Kernel() {
+		return vulkan_binaries_reduce_sum_packed_rgb8_to_u32_comp;
+	}
+	const ProgramBinaries& getReduceSumU8ToU32Kernel() {
+		return vulkan_binaries_reduce_sum_u8_to_u32_comp;
+	}
+	const ProgramBinaries& getReduceSumU32ToU32Kernel() {
+		return vulkan_binaries_reduce_sum_u32_to_u32_comp;
+	}
 	const ProgramBinaries& getWriteValueAtIndexKernel() {
 		return vulkan_binaries_write_value_at_index_comp;
+	}
+	const ProgramBinaries& getYcbcr420ToRgbKernel() {
+		return vulkan_binaries_ycbcr420_to_rgb_comp;
 	}
 }

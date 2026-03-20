@@ -1,0 +1,36 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+
+layout (std430, binding = 0) readonly buffer YPlaneIn { uint y_plane[]; };
+layout (std430, binding = 1) readonly buffer CbPlaneIn { uint cb_plane[]; };
+layout (std430, binding = 2) readonly buffer CrPlaneIn { uint cr_plane[]; };
+layout (std430, binding = 3) writeonly buffer OutputPixelsOut { uint output_pixels[]; };
+
+layout (push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint chroma_width;
+	uint pixel_count;
+} params;
+
+void main()
+{
+	uint index = workSize2DTo1D(gl_GlobalInvocationID);
+	if (index >= params.pixel_count) return;
+	uint x = index % params.width;
+	uint y = index / params.width;
+	uint chroma_x = x / 2u;
+	uint chroma_y = y / 2u;
+	float y_value = float(y_plane[index]);
+	float cb_value = float(cb_plane[chroma_y * params.chroma_width + chroma_x]) - 128.0;
+	float cr_value = float(cr_plane[chroma_y * params.chroma_width + chroma_x]) - 128.0;
+	uint r = uint(clamp(y_value + 1.402000 * cr_value, 0.0, 255.0) + 0.5);
+	uint g = uint(clamp(y_value - 0.344136 * cb_value - 0.714136 * cr_value, 0.0, 255.0) + 0.5);
+	uint b = uint(clamp(y_value + 1.772000 * cb_value, 0.0, 255.0) + 0.5);
+	output_pixels[index] = r | (g << 8u) | (b << 16u);
+}

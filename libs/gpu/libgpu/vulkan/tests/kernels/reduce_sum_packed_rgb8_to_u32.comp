@@ -1,0 +1,55 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+#include "defines.h"
+
+layout (local_size_x = VK_GROUP_SIZE) in;
+
+layout (std430, binding = 0) readonly buffer InputPixels {
+	uint packed_pixels_in[];
+};
+
+layout (std430, binding = 1) writeonly buffer OutputSums {
+	uint values_out[];
+};
+
+layout (push_constant) uniform PushConstants {
+	uint n;
+	uint values_per_thread;
+} params;
+
+shared uint local_sums[VK_GROUP_SIZE];
+
+uint packedRgbSum(uint packed)
+{
+	return (packed & 0xFFu) + ((packed >> 8u) & 0xFFu) + ((packed >> 16u) & 0xFFu);
+}
+
+void main()
+{
+	const uint global_index = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint local_index = gl_LocalInvocationIndex;
+	const uint group_index = workSize2DTo1D(gl_WorkGroupID);
+
+	uint sum = 0u;
+	const uint begin = global_index * params.values_per_thread;
+	const uint end = min(begin + params.values_per_thread, params.n);
+	for (uint i = begin; i < end; ++i) {
+		sum += packedRgbSum(packed_pixels_in[i]);
+	}
+
+	local_sums[local_index] = sum;
+	barrier();
+
+	for (uint stride = VK_GROUP_SIZE / 2; stride > 0; stride >>= 1) {
+		if (local_index < stride) {
+			local_sums[local_index] += local_sums[local_index + stride];
+		}
+		barrier();
+	}
+
+	if (local_index == 0u) {
+		values_out[group_index] = local_sums[0];
+	}
+}
