@@ -37,6 +37,7 @@ namespace avk2 {
 		const ProgramBinaries& getSiftMatchGemmLikeVec4Kernel();
 		const ProgramBinaries& getSiftMatchTensorCoresKernel();
 		const ProgramBinaries& getSiftMatchTensorCoresNvKernel();
+		const ProgramBinaries& getSiftMatchTensorCoresNvPreloadedAKernel();
 		const ProgramBinaries& getWriteValueAtIndexKernel();
 	const ProgramBinaries& getYcbcr420ToRgbKernel();
 }

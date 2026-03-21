@@ -12,6 +12,7 @@
 - «посмотри где в репозитории скрипт который устанавливает glslc?»
 - «обнови его чтобы он устанавливал более свежую версию и скажи какой его кусок выполнить мне в терминале чтобы установить эту новую версию»
 - «установил, обновил, действуй дальше»
+- «теперь расширь логику - нужно чтобы находился не только ближайший сосед, но и второй по близости тоже, насколько это замедляет?»
 
 ## Лог действий
 
@@ -64,6 +65,38 @@
 - После этого benchmark перепроверен:
   - на размере `2048 x 2048`;
   - на полном размере `40000 x 40000` на RTX 4090.
+- Для tensor-core path проведено профилирование через `nsys`:
+  - сначала обычный timeline/API trace;
+  - затем отдельный запуск под `sudo` с GPU metrics counters.
+- По `nsys` установлено, что исходный tensor-core kernel не упирается в DRAM bandwidth:
+  - `vkQueueSubmit` overhead маленький;
+  - основное ожидание идёт на `vkWaitForFences`;
+  - sampled counters для исходного NV kernel показывают низкий `Tensor Active` и низкий `SM Issue`, то есть bottleneck был в низкой утилизации execution resources, а не в памяти.
+- Проверен неудачный вариант с более тяжёлым staging/shared-memory reuse на несколько subgroup-ов; он оказался медленнее и не был оставлен в репозитории.
+- После профилирования добавлен новый отдельный NV tensor-core kernel `sift_match_tensor_cores_nv_preloaded_a.comp`:
+  - `A`-tile (`queries`) загружается в cooperative-matrix fragments один раз до цикла по `train` tiles;
+  - внутри цикла kernel переиспользует уже загруженные `A` fragments и подгружает только `B`-tile (`trains`);
+  - старый tensor-core kernel оставлен для прямого сравнения в том же benchmark.
+- Новый `preloaded-A` kernel перепроверен:
+  - на размере `4096 x 4096`;
+  - на полном размере `40000 x 40000` на RTX 4090;
+  - с `3` benchmark iterations на полном размере.
+- Логика benchmark и всех SIFT matcher kernels расширена с `top-1` до `top-2`:
+  - CPU brute-force reference теперь хранит лучший и второй лучший match;
+  - GPU matchers теперь пишут четыре массива результата: `best_index`, `best_score`, `second_best_index`, `second_best_score`;
+  - проверка корректности сравнивает обе позиции и обе score;
+  - для `fp16`/tensor путей дополнительно логгируется `top-2 pair differences vs fp32`.
+- Обновлены все kernels:
+  - `sift_match_bruteforce_local.comp`
+  - `sift_match_gemm_like.comp`
+  - `sift_match_gemm_like_vec4.comp`
+  - `sift_match_gemm_like_fp16_packed.comp`
+  - `sift_match_tensor_cores.comp`
+  - `sift_match_tensor_cores_nv.comp`
+  - `sift_match_tensor_cores_nv_preloaded_a.comp`
+- После изменений benchmark перепроверен:
+  - на размере `1024 x 1024`;
+  - на полном размере `40000 x 40000` на RTX 4090 с `3` iterations.
 
 ## Результат
 
@@ -96,3 +129,26 @@
   - Vulkan GEMM-like fp32: `~62.0 ms`, `~6611 GFLOPS`
   - Vulkan GEMM-like vec4 fp32: `~32.0 ms`, `~12786 GFLOPS`
 - Итог: tensor-core backend через `VK_NV_cooperative_matrix` примерно в `1.73x` быстрее текущего `vec4 fp32` kernel на целевом размере.
+- По профилированию исходного NV tensor-core kernel на `4096 x 4096` получены характерные метрики:
+  - `SM Active ~84%`
+  - `SM Issue ~6.7%`
+  - `Tensor Active ~4.3%`
+  - `DRAM Read Throughput ~1%`
+  - вывод: kernel не memory-bound, а latency/occupancy/utilization-bound.
+- После добавления `preloaded-A` kernel на RTX 4090 получены ориентировочно:
+  - `4096 x 4096`: старый NV tensor path `~0.281 ms`, `~15262 GFLOPS`; новый `preloaded-A` path `~0.253 ms`, `~16971 GFLOPS`
+  - `40000 x 40000`, `iters=1`: старый NV tensor path `~18.24 ms`, `~22454 GFLOPS`; новый `preloaded-A` path `~9.63 ms`, `~42551 GFLOPS`
+  - `40000 x 40000`, `iters=3`: старый NV tensor path median `~18.12 ms`, `~22605 GFLOPS`; новый `preloaded-A` path median `~10.67 ms`, `~38400 GFLOPS`
+  - `preloaded-A` drift vs fp32 остался тем же: `193 / 40000` (`~0.4825%`) top-1 differences
+- Итог последней оптимизации: отдельный `preloaded-A` tensor-core kernel ускорил исходный NV tensor-core path примерно в `1.7x` на полном размере без ухудшения top-1 drift.
+- После перехода на `top-2` на RTX 4090 для `40000 x 40000`, `iters=3` получены ориентировочно:
+  - CPU RootSIFT fp32: `~4.60 s`, `~89.1 GFLOPS`
+  - CPU RootSIFT fp16-quantized: `~4.75 s`, `~86.2 GFLOPS`
+  - CPU fp16 drift vs fp32: `top-1 192 / 40000` (`~0.48%`), `top-2 pair 536 / 40000` (`~1.34%`)
+  - Vulkan brute-force local: `~94.12 ms`, `~4352 GFLOPS`
+  - Vulkan GEMM-like fp16 packed: `~39.81 ms`, `~10290 GFLOPS`, `top-2 pair differences vs fp32: 535 / 40000` (`~1.3375%`)
+  - Vulkan tensor-core RootSIFT matcher (NV): `~18.25 ms`, `~22445 GFLOPS`, `top-2 pair differences vs fp32: 534 / 40000` (`~1.335%`)
+  - Vulkan tensor-core preloaded-A RootSIFT matcher (NV): `~9.81 ms`, `~41763 GFLOPS`, `top-2 pair differences vs fp32: 534 / 40000` (`~1.335%`)
+  - Vulkan GEMM-like fp32: `~59.48 ms`, `~6886 GFLOPS`
+  - Vulkan GEMM-like vec4 fp32: `~29.53 ms`, `~13869 GFLOPS`
+- Сравнение с предыдущими `top-1` замерами показало, что дополнительная логика `top-2` не дала заметного замедления: на уровне `3` benchmark iterations времена изменились в пределах шумов измерения, а для `preloaded-A` tensor path медиана осталась около `10 ms`.

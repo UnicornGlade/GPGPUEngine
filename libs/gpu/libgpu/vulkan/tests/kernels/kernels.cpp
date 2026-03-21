@@ -35,6 +35,7 @@
 #include "generated_kernels/sift_match_gemm_like_vec4_comp.h"
 #include "generated_kernels/sift_match_tensor_cores_comp.h"
 #include "generated_kernels/sift_match_tensor_cores_nv_comp.h"
+#include "generated_kernels/sift_match_tensor_cores_nv_preloaded_a_comp.h"
 #include "generated_kernels/write_value_at_index_comp.h"
 #include "generated_kernels/ycbcr420_to_rgb_comp.h"
 
@@ -149,6 +150,9 @@ namespace avk2 {
 		}
 		const ProgramBinaries& getSiftMatchTensorCoresNvKernel() {
 			return vulkan_binaries_sift_match_tensor_cores_nv_comp;
+		}
+		const ProgramBinaries& getSiftMatchTensorCoresNvPreloadedAKernel() {
+			return vulkan_binaries_sift_match_tensor_cores_nv_preloaded_a_comp;
 		}
 		const ProgramBinaries& getWriteValueAtIndexKernel() {
 			return vulkan_binaries_write_value_at_index_comp;

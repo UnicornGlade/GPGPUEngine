@@ -1,6 +1,6 @@
 #version 450
 
-#extension GL_KHR_cooperative_matrix : enable
+#extension GL_NV_cooperative_matrix : require
 #extension GL_KHR_memory_scope_semantics : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #extension GL_KHR_shader_subgroup_basic : enable
@@ -70,6 +70,25 @@ void main()
 	const uint query_base = tile_row * kTileM;
 	const uint query_index = query_base + subgroup_lane;
 	const bool query_is_active = subgroup_lane < kTileM && query_index < params.n_queries;
+	const uint query_offset = query_base * kDescriptorDim;
+
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a0;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a1;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a2;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a3;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a4;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a5;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a6;
+	fcoopmatNV<16, gl_ScopeSubgroup, kTileM, kTileK> mat_a7;
+
+	coopMatLoadNV(mat_a0, queries, query_offset + 0u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a1, queries, query_offset + 1u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a2, queries, query_offset + 2u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a3, queries, query_offset + 3u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a4, queries, query_offset + 4u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a5, queries, query_offset + 5u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a6, queries, query_offset + 6u * kTileK, kDescriptorDim, false);
+	coopMatLoadNV(mat_a7, queries, query_offset + 7u * kTileK, kDescriptorDim, false);
 
 	float best_score = -3.402823466e38f;
 	uint best_index = 0u;
@@ -77,21 +96,30 @@ void main()
 	uint second_best_index = 0u;
 
 	for (uint train_base = 0u; train_base < params.n_trains; train_base += kTileN) {
-		coopmat<float, gl_ScopeSubgroup, kTileM, kTileN, gl_MatrixUseAccumulator> acc =
-			coopmat<float, gl_ScopeSubgroup, kTileM, kTileN, gl_MatrixUseAccumulator>(0.0);
+		fcoopmatNV<32, gl_ScopeSubgroup, kTileM, kTileN> acc =
+			fcoopmatNV<32, gl_ScopeSubgroup, kTileM, kTileN>(0.0);
 
-		for (uint k_base = 0u; k_base < kDescriptorDim; k_base += kTileK) {
-			coopmat<float16_t, gl_ScopeSubgroup, kTileM, kTileK, gl_MatrixUseA> mat_a;
-			coopmat<float16_t, gl_ScopeSubgroup, kTileK, kTileN, gl_MatrixUseB> mat_b;
+		fcoopmatNV<16, gl_ScopeSubgroup, kTileK, kTileN> mat_b;
+		const uint train_offset = train_base * kDescriptorDim;
 
-			const uint query_offset = query_base * kDescriptorDim + k_base;
-			const uint train_offset = train_base * kDescriptorDim + k_base;
-			coopMatLoad(mat_a, queries, query_offset, kDescriptorDim, gl_CooperativeMatrixLayoutRowMajor);
-			coopMatLoad(mat_b, trains, train_offset, kDescriptorDim, gl_CooperativeMatrixLayoutColumnMajor);
-			acc = coopMatMulAdd(mat_a, mat_b, acc);
-		}
+		coopMatLoadNV(mat_b, trains, train_offset + 0u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a0, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 1u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a1, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 2u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a2, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 3u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a3, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 4u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a4, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 5u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a5, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 6u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a6, mat_b, acc);
+		coopMatLoadNV(mat_b, trains, train_offset + 7u * kTileK, kDescriptorDim, true);
+		acc = coopMatMulAddNV(mat_a7, mat_b, acc);
 
-		coopMatStore(acc, score_tile, 0u, kTileN, gl_CooperativeMatrixLayoutRowMajor);
+		coopMatStoreNV(acc, score_tile, 0u, kTileN, false);
 		barrier();
 
 		if (query_is_active) {

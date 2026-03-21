@@ -20,6 +20,14 @@ layout(std430, binding = 3) writeonly buffer BestScoresOut {
 	float best_scores[];
 };
 
+layout(std430, binding = 4) writeonly buffer SecondBestIndicesOut {
+	uint second_best_indices[];
+};
+
+layout(std430, binding = 5) writeonly buffer SecondBestScoresOut {
+	float second_best_scores[];
+};
+
 layout(push_constant) uniform PushConstants {
 	uint n_queries;
 	uint n_trains;
@@ -29,6 +37,24 @@ const uint kDescriptorPacked = 64u;
 const uint kTrainTile = 64u;
 
 shared uint train_tile[kTrainTile][kDescriptorPacked];
+
+void updateBest2(float score,
+				 uint index,
+				 inout float best_score,
+				 inout uint best_index,
+				 inout float second_best_score,
+				 inout uint second_best_index)
+{
+	if (score > best_score) {
+		second_best_score = best_score;
+		second_best_index = best_index;
+		best_score = score;
+		best_index = index;
+	} else if (index != best_index && score > second_best_score) {
+		second_best_score = score;
+		second_best_index = index;
+	}
+}
 
 void main()
 {
@@ -50,6 +76,8 @@ void main()
 
 	float best_score = -3.402823466e38f;
 	uint best_index = 0u;
+	float second_best_score = -3.402823466e38f;
+	uint second_best_index = 0u;
 
 	for (uint train_base = 0u; train_base < params.n_trains; train_base += kTrainTile) {
 		for (uint linear_index = local_index; linear_index < kTrainTile * kDescriptorPacked; linear_index += gl_WorkGroupSize.x) {
@@ -71,10 +99,7 @@ void main()
 					score += dot(unpackHalf2x16(query_registers[component2]),
 								 unpackHalf2x16(train_tile[tile_train][component2]));
 				}
-				if (score > best_score) {
-					best_score = score;
-					best_index = train_base + tile_train;
-				}
+				updateBest2(score, train_base + tile_train, best_score, best_index, second_best_score, second_best_index);
 			}
 		}
 		barrier();
@@ -83,5 +108,7 @@ void main()
 	if (query_is_active) {
 		best_indices[query_index] = best_index;
 		best_scores[query_index] = best_score;
+		second_best_indices[query_index] = second_best_index;
+		second_best_scores[query_index] = second_best_score;
 	}
 }

@@ -34,8 +34,10 @@ constexpr uint32_t kGemmLikeGroupSize = 16u;
 constexpr uint32_t kGemmLikeVec4GroupSize = 32u;
 
 struct MatchResult {
-	std::vector<uint32_t> indices;
-	std::vector<float> scores;
+	std::vector<uint32_t> best_indices;
+	std::vector<float> best_scores;
+	std::vector<uint32_t> second_best_indices;
+	std::vector<float> second_best_scores;
 };
 
 struct CpuBenchmarkResult {
@@ -246,8 +248,10 @@ CpuBenchmarkResult bruteForceCpuReference(const std::vector<float> &queries,
 	rassert(thread_count > 0u, 2026032123250100007, thread_count);
 
 	CpuBenchmarkResult result;
-	result.matches.indices.resize(n_queries, 0u);
-	result.matches.scores.resize(n_queries, -std::numeric_limits<float>::infinity());
+	result.matches.best_indices.resize(n_queries, 0u);
+	result.matches.best_scores.resize(n_queries, -std::numeric_limits<float>::infinity());
+	result.matches.second_best_indices.resize(n_queries, 0u);
+	result.matches.second_best_scores.resize(n_queries, -std::numeric_limits<float>::infinity());
 
 	timer cpu_timer;
 	std::vector<std::thread> workers;
@@ -259,15 +263,24 @@ CpuBenchmarkResult bruteForceCpuReference(const std::vector<float> &queries,
 			for (uint32_t query_index = query_begin; query_index < query_end; ++query_index) {
 				float best_score = -std::numeric_limits<float>::infinity();
 				uint32_t best_index = 0u;
+				float second_best_score = -std::numeric_limits<float>::infinity();
+				uint32_t second_best_index = 0u;
 				for (uint32_t train_index = 0; train_index < n_trains; ++train_index) {
 					const float score = computeDot(queries, trains, query_index, train_index);
 					if (score > best_score) {
+						second_best_score = best_score;
+						second_best_index = best_index;
 						best_score = score;
 						best_index = train_index;
+					} else if (train_index != best_index && score > second_best_score) {
+						second_best_score = score;
+						second_best_index = train_index;
 					}
 				}
-				result.matches.indices[query_index] = best_index;
-				result.matches.scores[query_index] = best_score;
+				result.matches.best_indices[query_index] = best_index;
+				result.matches.best_scores[query_index] = best_score;
+				result.matches.second_best_indices[query_index] = second_best_index;
+				result.matches.second_best_scores[query_index] = second_best_score;
 			}
 		});
 	}
@@ -293,6 +306,8 @@ GpuBenchmarkResult runGpuMatcher(avk2::KernelSource &kernel,
 	gpu::gpu_mem_32f trains_gpu(n_trains * kDescriptorDim);
 	gpu::gpu_mem_32u best_indices_gpu(n_queries);
 	gpu::gpu_mem_32f best_scores_gpu(n_queries);
+	gpu::gpu_mem_32u second_best_indices_gpu(n_queries);
+	gpu::gpu_mem_32f second_best_scores_gpu(n_queries);
 
 	{
 		timer upload_timer;
@@ -308,7 +323,7 @@ GpuBenchmarkResult runGpuMatcher(avk2::KernelSource &kernel,
 
 	{
 		profiling::ScopedRange scope("sift match gpu warmup", 0xFF7E57C2);
-		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 		context.vk()->waitForAllInflightComputeLaunches();
 	}
 
@@ -316,7 +331,7 @@ GpuBenchmarkResult runGpuMatcher(avk2::KernelSource &kernel,
 		timer compute_timer;
 		{
 			profiling::ScopedRange scope("sift match gpu compute", 0xFF2E8B57);
-			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 			context.vk()->waitForAllInflightComputeLaunches();
 		}
 		result.compute_seconds.push_back(compute_timer.elapsed());
@@ -325,8 +340,10 @@ GpuBenchmarkResult runGpuMatcher(avk2::KernelSource &kernel,
 	{
 		timer readback_timer;
 		profiling::ScopedRange scope("sift match readback", 0xFFB9770E);
-		result.matches.indices = best_indices_gpu.readVector(n_queries);
-		result.matches.scores = best_scores_gpu.readVector(n_queries);
+		result.matches.best_indices = best_indices_gpu.readVector(n_queries);
+		result.matches.best_scores = best_scores_gpu.readVector(n_queries);
+		result.matches.second_best_indices = second_best_indices_gpu.readVector(n_queries);
+		result.matches.second_best_scores = second_best_scores_gpu.readVector(n_queries);
 		result.readback_seconds = readback_timer.elapsed();
 	}
 
@@ -348,6 +365,8 @@ GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
 	gpu::gpu_mem_32u trains_gpu(trains_packed.size());
 	gpu::gpu_mem_32u best_indices_gpu(n_queries);
 	gpu::gpu_mem_32f best_scores_gpu(n_queries);
+	gpu::gpu_mem_32u second_best_indices_gpu(n_queries);
+	gpu::gpu_mem_32f second_best_scores_gpu(n_queries);
 
 	{
 		timer upload_timer;
@@ -363,7 +382,7 @@ GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
 
 	{
 		profiling::ScopedRange scope("sift match fp16 warmup", 0xFF7E57C2);
-		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 		context.vk()->waitForAllInflightComputeLaunches();
 	}
 
@@ -371,7 +390,7 @@ GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
 		timer compute_timer;
 		{
 			profiling::ScopedRange scope("sift match fp16 compute", 0xFF2E8B57);
-			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 			context.vk()->waitForAllInflightComputeLaunches();
 		}
 		result.compute_seconds.push_back(compute_timer.elapsed());
@@ -380,8 +399,10 @@ GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
 	{
 		timer readback_timer;
 		profiling::ScopedRange scope("sift match fp16 readback", 0xFFB9770E);
-		result.matches.indices = best_indices_gpu.readVector(n_queries);
-		result.matches.scores = best_scores_gpu.readVector(n_queries);
+		result.matches.best_indices = best_indices_gpu.readVector(n_queries);
+		result.matches.best_scores = best_scores_gpu.readVector(n_queries);
+		result.matches.second_best_indices = second_best_indices_gpu.readVector(n_queries);
+		result.matches.second_best_scores = second_best_scores_gpu.readVector(n_queries);
 		result.readback_seconds = readback_timer.elapsed();
 	}
 
@@ -404,6 +425,8 @@ GpuBenchmarkResult runGpuMatcherFp16Scalar(avk2::KernelSource &kernel,
 	gpu::gpu_mem_16u trains_gpu(trains_fp16.size());
 	gpu::gpu_mem_32u best_indices_gpu(n_queries);
 	gpu::gpu_mem_32f best_scores_gpu(n_queries);
+	gpu::gpu_mem_32u second_best_indices_gpu(n_queries);
+	gpu::gpu_mem_32f second_best_scores_gpu(n_queries);
 
 	{
 		timer upload_timer;
@@ -419,7 +442,7 @@ GpuBenchmarkResult runGpuMatcherFp16Scalar(avk2::KernelSource &kernel,
 
 	{
 		profiling::ScopedRange scope("sift match tensor warmup", 0xFF7E57C2);
-		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 		context.vk()->waitForAllInflightComputeLaunches();
 	}
 
@@ -427,7 +450,7 @@ GpuBenchmarkResult runGpuMatcherFp16Scalar(avk2::KernelSource &kernel,
 		timer compute_timer;
 		{
 			profiling::ScopedRange scope("sift match tensor compute", 0xFF2E8B57);
-			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu, second_best_indices_gpu, second_best_scores_gpu);
 			context.vk()->waitForAllInflightComputeLaunches();
 		}
 		result.compute_seconds.push_back(compute_timer.elapsed());
@@ -436,8 +459,10 @@ GpuBenchmarkResult runGpuMatcherFp16Scalar(avk2::KernelSource &kernel,
 	{
 		timer readback_timer;
 		profiling::ScopedRange scope("sift match tensor readback", 0xFFB9770E);
-		result.matches.indices = best_indices_gpu.readVector(n_queries);
-		result.matches.scores = best_scores_gpu.readVector(n_queries);
+		result.matches.best_indices = best_indices_gpu.readVector(n_queries);
+		result.matches.best_scores = best_scores_gpu.readVector(n_queries);
+		result.matches.second_best_indices = second_best_indices_gpu.readVector(n_queries);
+		result.matches.second_best_scores = second_best_scores_gpu.readVector(n_queries);
 		result.readback_seconds = readback_timer.elapsed();
 	}
 
@@ -451,8 +476,10 @@ void expectCloseToCpuReference(const std::string &label,
 							   const std::vector<float> &trains,
 							   uint32_t n_trains)
 {
-	rassert(cpu_reference.indices.size() == gpu_result.indices.size(), 2026032123250100008, cpu_reference.indices.size(), gpu_result.indices.size());
-	rassert(cpu_reference.scores.size() == gpu_result.scores.size(), 2026032123250100009, cpu_reference.scores.size(), gpu_result.scores.size());
+	rassert(cpu_reference.best_indices.size() == gpu_result.best_indices.size(), 2026032123250100008, cpu_reference.best_indices.size(), gpu_result.best_indices.size());
+	rassert(cpu_reference.best_scores.size() == gpu_result.best_scores.size(), 2026032123250100009, cpu_reference.best_scores.size(), gpu_result.best_scores.size());
+	rassert(cpu_reference.second_best_indices.size() == gpu_result.second_best_indices.size(), 2026032118042900001, cpu_reference.second_best_indices.size(), gpu_result.second_best_indices.size());
+	rassert(cpu_reference.second_best_scores.size() == gpu_result.second_best_scores.size(), 2026032118042900002, cpu_reference.second_best_scores.size(), gpu_result.second_best_scores.size());
 
 	const float kAllowedScoreGap = 1e-4f;
 	const float kAllowedReadbackError = 5e-4f;
@@ -461,28 +488,44 @@ void expectCloseToCpuReference(const std::string &label,
 	float max_readback_error = 0.0f;
 	std::vector<std::string> mismatch_examples;
 
-	for (size_t query_index = 0; query_index < cpu_reference.indices.size(); ++query_index) {
-		rassert(gpu_result.indices[query_index] < n_trains, 2026032123250100010, query_index, gpu_result.indices[query_index], n_trains);
-		const float cpu_best = cpu_reference.scores[query_index];
-		const float gpu_reported = gpu_result.scores[query_index];
-		const float gpu_actual = computeDot(queries, trains, static_cast<uint32_t>(query_index), gpu_result.indices[query_index]);
-		const float score_gap = cpu_best - gpu_actual;
-		const float readback_error = std::abs(gpu_reported - gpu_actual);
-		max_score_gap = std::max(max_score_gap, score_gap);
-		max_readback_error = std::max(max_readback_error, readback_error);
+	for (size_t query_index = 0; query_index < cpu_reference.best_indices.size(); ++query_index) {
+		rassert(gpu_result.best_indices[query_index] < n_trains, 2026032123250100010, query_index, gpu_result.best_indices[query_index], n_trains);
+		rassert(gpu_result.second_best_indices[query_index] < n_trains, 2026032118042900003, query_index, gpu_result.second_best_indices[query_index], n_trains);
+		rassert(gpu_result.best_indices[query_index] != gpu_result.second_best_indices[query_index], 2026032118042900004, query_index, gpu_result.best_indices[query_index]);
 
-		if (score_gap > kAllowedScoreGap || readback_error > kAllowedReadbackError) {
+		const float cpu_best = cpu_reference.best_scores[query_index];
+		const float cpu_second_best = cpu_reference.second_best_scores[query_index];
+		const float gpu_best_reported = gpu_result.best_scores[query_index];
+		const float gpu_second_best_reported = gpu_result.second_best_scores[query_index];
+		const float gpu_best_actual = computeDot(queries, trains, static_cast<uint32_t>(query_index), gpu_result.best_indices[query_index]);
+		const float gpu_second_best_actual = computeDot(queries, trains, static_cast<uint32_t>(query_index), gpu_result.second_best_indices[query_index]);
+		const float best_score_gap = cpu_best - gpu_best_actual;
+		const float second_best_score_gap = cpu_second_best - gpu_second_best_actual;
+		const float best_readback_error = std::abs(gpu_best_reported - gpu_best_actual);
+		const float second_best_readback_error = std::abs(gpu_second_best_reported - gpu_second_best_actual);
+		max_score_gap = std::max(max_score_gap, std::max(best_score_gap, second_best_score_gap));
+		max_readback_error = std::max(max_readback_error, std::max(best_readback_error, second_best_readback_error));
+
+		if (best_score_gap > kAllowedScoreGap || second_best_score_gap > kAllowedScoreGap ||
+			best_readback_error > kAllowedReadbackError || second_best_readback_error > kAllowedReadbackError) {
 			++mismatches;
 			if (mismatch_examples.size() < 5u) {
 				std::ostringstream stream;
 				stream << "q=" << query_index
-					   << " cpu_idx=" << cpu_reference.indices[query_index]
-					   << " gpu_idx=" << gpu_result.indices[query_index]
-					   << " cpu_score=" << std::setprecision(8) << cpu_best
-					   << " gpu_actual=" << gpu_actual
-					   << " gpu_reported=" << gpu_reported
-					   << " score_gap=" << score_gap
-					   << " readback_error=" << readback_error;
+					   << " cpu_best_idx=" << cpu_reference.best_indices[query_index]
+					   << " gpu_best_idx=" << gpu_result.best_indices[query_index]
+					   << " cpu_second_idx=" << cpu_reference.second_best_indices[query_index]
+					   << " gpu_second_idx=" << gpu_result.second_best_indices[query_index]
+					   << " cpu_best_score=" << std::setprecision(8) << cpu_best
+					   << " gpu_best_actual=" << gpu_best_actual
+					   << " gpu_best_reported=" << gpu_best_reported
+					   << " cpu_second_score=" << cpu_second_best
+					   << " gpu_second_actual=" << gpu_second_best_actual
+					   << " gpu_second_reported=" << gpu_second_best_reported
+					   << " best_score_gap=" << best_score_gap
+					   << " second_score_gap=" << second_best_score_gap
+					   << " best_readback_error=" << best_readback_error
+					   << " second_readback_error=" << second_best_readback_error;
 				mismatch_examples.push_back(stream.str());
 			}
 		}
@@ -576,18 +619,38 @@ void logTop1DifferencesVsFp32(const std::string &label,
 							  const MatchResult &fp32_reference,
 							  const MatchResult &candidate)
 {
-	rassert(fp32_reference.indices.size() == candidate.indices.size(), 2026032200110400001, fp32_reference.indices.size(), candidate.indices.size());
+	rassert(fp32_reference.best_indices.size() == candidate.best_indices.size(), 2026032200110400001, fp32_reference.best_indices.size(), candidate.best_indices.size());
 	size_t different_count = 0;
-	for (size_t i = 0; i < fp32_reference.indices.size(); ++i) {
-		if (fp32_reference.indices[i] != candidate.indices[i]) {
+	for (size_t i = 0; i < fp32_reference.best_indices.size(); ++i) {
+		if (fp32_reference.best_indices[i] != candidate.best_indices[i]) {
 			++different_count;
 		}
 	}
 
-	const double total = static_cast<double>(fp32_reference.indices.size());
+	const double total = static_cast<double>(fp32_reference.best_indices.size());
 	const double percent = total > 0.0 ? 100.0 * static_cast<double>(different_count) / total : 0.0;
 	std::cout << "  top-1 differences vs fp32: " << different_count
-			  << " / " << fp32_reference.indices.size()
+			  << " / " << fp32_reference.best_indices.size()
+			  << " (" << percent << "%)" << std::endl;
+}
+
+void logTop2PairDifferencesVsFp32(const MatchResult &fp32_reference,
+								  const MatchResult &candidate)
+{
+	rassert(fp32_reference.best_indices.size() == candidate.best_indices.size(), 2026032118042900005, fp32_reference.best_indices.size(), candidate.best_indices.size());
+	rassert(fp32_reference.second_best_indices.size() == candidate.second_best_indices.size(), 2026032118042900006, fp32_reference.second_best_indices.size(), candidate.second_best_indices.size());
+	size_t different_count = 0;
+	for (size_t i = 0; i < fp32_reference.best_indices.size(); ++i) {
+		if (fp32_reference.best_indices[i] != candidate.best_indices[i] ||
+			fp32_reference.second_best_indices[i] != candidate.second_best_indices[i]) {
+			++different_count;
+		}
+	}
+
+	const double total = static_cast<double>(fp32_reference.best_indices.size());
+	const double percent = total > 0.0 ? 100.0 * static_cast<double>(different_count) / total : 0.0;
+	std::cout << "  top-2 pair differences vs fp32: " << different_count
+			  << " / " << fp32_reference.best_indices.size()
 			  << " (" << percent << "%)" << std::endl;
 }
 
@@ -634,6 +697,7 @@ TEST(vulkan, siftMatchBenchmark)
 	logCpuBenchmark(cpu_reference_fp16, descriptor_count, descriptor_count, cpu_thread_count);
 	std::cout << "CPU fp16 quantized reference drift:" << std::endl;
 	logTop1DifferencesVsFp32("cpu fp16 vs fp32", cpu_reference.matches, cpu_reference_fp16.matches);
+	logTop2PairDifferencesVsFp32(cpu_reference.matches, cpu_reference_fp16.matches);
 
 	size_t tested_devices = 0;
 	for (size_t device_index = 0; device_index < devices.size(); ++device_index) {
@@ -653,6 +717,7 @@ TEST(vulkan, siftMatchBenchmark)
 		avk2::KernelSource gemm_like_vec4_kernel(avk2::getSiftMatchGemmLikeVec4Kernel());
 			avk2::KernelSource tensor_core_kernel(avk2::getSiftMatchTensorCoresKernel());
 			avk2::KernelSource tensor_core_kernel_nv(avk2::getSiftMatchTensorCoresNvKernel());
+			avk2::KernelSource tensor_core_kernel_nv_preloaded_a(avk2::getSiftMatchTensorCoresNvPreloadedAKernel());
 			const bool has_fp32_coop_matrices = hasFp32CooperativeMatrices(devices[device_index]);
 			const TensorCoreMode tensor_core_mode = detectTensorCoreMode(devices[device_index]);
 
@@ -696,6 +761,7 @@ TEST(vulkan, siftMatchBenchmark)
 						descriptor_count,
 						has_fp32_coop_matrices);
 		logTop1DifferencesVsFp32("gpu fp16 vs fp32", cpu_reference.matches, fp16_packed_result.matches);
+		logTop2PairDifferencesVsFp32(cpu_reference.matches, fp16_packed_result.matches);
 
 			if (tensor_core_mode != TensorCoreMode::None) {
 				const uint32_t tensor_work_items = ((descriptor_count + 15u) / 16u) * 32u;
@@ -726,6 +792,32 @@ TEST(vulkan, siftMatchBenchmark)
 								descriptor_count,
 								has_fp32_coop_matrices);
 				logTop1DifferencesVsFp32("gpu tensor core vs fp32", cpu_reference.matches, tensor_core_result.matches);
+				logTop2PairDifferencesVsFp32(cpu_reference.matches, tensor_core_result.matches);
+
+				if (tensor_core_mode == TensorCoreMode::Nv) {
+					const GpuBenchmarkResult tensor_core_preloaded_a_result = runGpuMatcherFp16Scalar(tensor_core_kernel_nv_preloaded_a,
+																									  context,
+																									  32u,
+																									  tensor_work_items,
+																									  queries_fp16_scalar,
+																									  trains_fp16_scalar,
+																									  descriptor_count,
+																									  descriptor_count,
+																									  benchmark_iterations);
+					expectCloseToCpuReference("vk tensor core preloaded-a matcher",
+											  cpu_reference_fp16.matches,
+											  tensor_core_preloaded_a_result.matches,
+											  queries_fp16,
+											  trains_fp16,
+											  descriptor_count);
+					logGpuBenchmark("Vulkan tensor-core preloaded-A RootSIFT matcher (NV)",
+									tensor_core_preloaded_a_result,
+									descriptor_count,
+									descriptor_count,
+									has_fp32_coop_matrices);
+					logTop1DifferencesVsFp32("gpu tensor core preloaded-a vs fp32", cpu_reference.matches, tensor_core_preloaded_a_result.matches);
+					logTop2PairDifferencesVsFp32(cpu_reference.matches, tensor_core_preloaded_a_result.matches);
+				}
 			} else {
 				std::cout << "Vulkan tensor-core RootSIFT matcher: skipped (no fp16->fp32 16x16x16 cooperative matrix support via KHR/NV cooperative matrices)" << std::endl;
 			}
