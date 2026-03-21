@@ -166,22 +166,6 @@ gpu::gpu_mem_32u *launchReductionOnGpu(const gpu::gpu_mem<T> &input,
 	return current;
 }
 
-fs::path findDefaultBenchmarkDir()
-{
-	fs::path current = fs::current_path();
-	for (;;) {
-		const fs::path candidate = current / "data/jpeg_benchmark";
-		if (fs::exists(candidate)) {
-			return candidate;
-		}
-		if (current == current.root_path()) {
-			break;
-		}
-		current = current.parent_path();
-	}
-	return {};
-}
-
 BenchmarkStats runSingleImageBenchmark(const fs::path &path)
 {
 	BenchmarkStats result;
@@ -257,7 +241,7 @@ BenchmarkStats runSingleImageBenchmark(const fs::path &path)
 std::vector<fs::path> collectBenchmarkImages()
 {
 	const char *env_dir = std::getenv("GPGPU_VULKAN_JPEG_BENCHMARK_DIR");
-	fs::path dir = env_dir ? fs::path(env_dir) : findDefaultBenchmarkDir();
+	fs::path dir = findOrPrepareJpegBenchmarkDir(env_dir);
 	if (dir.empty() || !fs::exists(dir)) {
 		return {};
 	}
@@ -300,7 +284,7 @@ TEST(vulkan, jpegDecodeBenchmark)
 {
 	std::vector<fs::path> image_paths = collectBenchmarkImages();
 	if (image_paths.empty()) {
-		GTEST_SKIP() << "No JPEG benchmark images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or add *.jpg under data/jpeg_benchmark";
+		GTEST_SKIP() << "No JPEG benchmark images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or allow lazy download into .local_data/gpgpu_jpeg_benchmark_real";
 	}
 
 	std::vector<gpu::Device> devices = enumVKDevices();

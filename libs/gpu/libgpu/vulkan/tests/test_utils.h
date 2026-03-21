@@ -1,6 +1,12 @@
 #pragma once
 
+#include <array>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <random>
+#include <string>
+#include <vector>
 
 #include <libgpu/context.h>
 #include <libgpu/vulkan/engine.h>
@@ -117,6 +123,140 @@ T generate_random_color(Random &r, T min_value, T max_value)
 {
 	std::uniform_int_distribution<T> random_color(min_value, max_value);
 	return random_color(r);
+}
+
+struct RemoteJpegSpec {
+	const char *filename;
+	const char *url;
+};
+
+std::string shellQuote(const std::string &value)
+{
+	std::string quoted = "'";
+	for (char c : value) {
+		if (c == '\'') {
+			quoted += "'\\''";
+		} else {
+			quoted += c;
+		}
+	}
+	quoted += "'";
+	return quoted;
+}
+
+bool fileLooksLikeJpeg(const std::filesystem::path &path)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input.good()) {
+		return false;
+	}
+	unsigned char soi[2] = {0, 0};
+	input.read(reinterpret_cast<char *>(soi), 2);
+	return input.gcount() == 2 && soi[0] == 0xFFu && soi[1] == 0xD8u;
+}
+
+bool shellCommandExists(const std::string &command)
+{
+	const std::string probe = "command -v " + shellQuote(command) + " >/dev/null 2>&1";
+	return std::system(probe.c_str()) == 0;
+}
+
+void downloadFileViaShell(const std::string &url, const std::filesystem::path &output_path)
+{
+	const std::filesystem::path temp_path = output_path.string() + ".download";
+	std::filesystem::remove(temp_path);
+	std::filesystem::create_directories(output_path.parent_path());
+
+	std::string command;
+	if (shellCommandExists("curl")) {
+		command = "curl -L --fail --silent --show-error"
+				+ std::string(" --retry 5 --retry-delay 1 --retry-all-errors")
+				+ std::string(" -A ")
+				+ shellQuote("Mozilla/5.0 CodexJPEGBenchmark/1.0")
+				+ " -o "
+				+ shellQuote(temp_path.string())
+				+ " "
+				+ shellQuote(url);
+	} else if (shellCommandExists("wget")) {
+		command = "wget -q"
+				+ std::string(" --tries=6 --waitretry=1")
+				+ std::string(" --user-agent=")
+				+ shellQuote("Mozilla/5.0 CodexJPEGBenchmark/1.0")
+				+ " -O "
+				+ shellQuote(temp_path.string())
+				+ " "
+				+ shellQuote(url);
+	} else {
+		rassert(false, 2026032119183300001, "Neither curl nor wget is available for JPEG benchmark download");
+	}
+
+	std::cout << "Downloading JPEG benchmark image: " << output_path.filename().string()
+			  << " from " << url << std::endl;
+	const int exit_code = std::system(command.c_str());
+	rassert(exit_code == 0, 2026032119183300002, url, output_path.string(), exit_code);
+	rassert(fileLooksLikeJpeg(temp_path), 2026032119183300003, url, temp_path.string());
+	std::filesystem::rename(temp_path, output_path);
+}
+
+std::filesystem::path ensureDefaultRealJpegBenchmarkDir()
+{
+	namespace fs = std::filesystem;
+
+	const std::array<RemoteJpegSpec, 5> kRemoteJpegs = {{
+		{"mp4_first_night_mary_river.jpg", "https://commons.wikimedia.org/wiki/Special:Redirect/file/First%20night%20at%20Mary%20River%20%289103309112%29.jpg"},
+		{"k4_ts_2014_12_23_2268.jpg", "https://commons.wikimedia.org/wiki/Special:Redirect/file/TS%202014-12-23-2268%20%2815464308094%29.jpg"},
+		{"mp20_namwon_nongak.jpg", "https://commons.wikimedia.org/wiki/Special:Redirect/file/%EB%82%A8%EC%9B%90%EB%86%8D%EC%95%85.jpg"},
+		{"mp40_vaz_2109_8000x6000.jpg", "https://commons.wikimedia.org/wiki/Special:Redirect/file/VAZ%202109%208000x6000.jpg"},
+		{"mp60_earth_from_orbit_8000x8000.jpg", "https://svs.gsfc.nasa.gov/vis/a010000/a011200/a011268/cover-original.jpg"},
+	}};
+
+	fs::path current = fs::current_path();
+	fs::path repo_root;
+	for (;;) {
+		if (fs::exists(current / ".gitignore") && fs::exists(current / "libs")) {
+			repo_root = current;
+			break;
+		}
+		if (current == current.root_path()) {
+			break;
+		}
+		current = current.parent_path();
+	}
+	rassert(!repo_root.empty(), 2026032119183300004, fs::current_path().string());
+
+	const fs::path target_dir = repo_root / ".local_data" / "gpgpu_jpeg_benchmark_real";
+	fs::create_directories(target_dir);
+	for (const RemoteJpegSpec &spec : kRemoteJpegs) {
+		const fs::path local_path = target_dir / spec.filename;
+		if (fileLooksLikeJpeg(local_path)) {
+			continue;
+		}
+		downloadFileViaShell(spec.url, local_path);
+	}
+	return target_dir;
+}
+
+std::filesystem::path findOrPrepareJpegBenchmarkDir(const char *env_dir)
+{
+	namespace fs = std::filesystem;
+
+	if (env_dir != nullptr && std::string(env_dir) != "") {
+		return fs::path(env_dir);
+	}
+
+	fs::path current = fs::current_path();
+	for (;;) {
+		const fs::path candidate = current / "data/jpeg_benchmark";
+		if (fs::exists(candidate)) {
+			return candidate;
+		}
+		if (current == current.root_path()) {
+			break;
+		}
+		current = current.parent_path();
+	}
+
+	return ensureDefaultRealJpegBenchmarkDir();
 }
 
 template <>

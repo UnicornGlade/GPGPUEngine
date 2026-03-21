@@ -427,22 +427,6 @@ gpu::gpu_mem_32u *launchReductionOnGpu(const gpu::gpu_mem<T> &input,
 	return current;
 }
 
-fs::path findDefaultBenchmarkDir()
-{
-	fs::path current = fs::current_path();
-	for (;;) {
-		const fs::path candidate = current / "data/jpeg_benchmark";
-		if (fs::exists(candidate)) {
-			return candidate;
-		}
-		if (current == current.root_path()) {
-			break;
-		}
-		current = current.parent_path();
-	}
-	return {};
-}
-
 class ByteReader {
 public:
 	explicit ByteReader(const std::vector<uint8_t> &data) : data_(data), pos_(0) {}
@@ -771,7 +755,7 @@ GpuPreparedColorImage prepareGpuColorJpegArtifact(const fs::path &source_path, C
 std::vector<fs::path> collectSourceImages()
 {
 	const char *env_dir = std::getenv("GPGPU_VULKAN_JPEG_BENCHMARK_DIR");
-	fs::path dir = env_dir ? fs::path(env_dir) : findDefaultBenchmarkDir();
+	fs::path dir = findOrPrepareJpegBenchmarkDir(env_dir);
 	if (dir.empty() || !fs::exists(dir)) {
 		return {};
 	}
@@ -1262,7 +1246,7 @@ TEST(vulkan, jpegDecodeBenchmarkGpuColor)
 {
 	std::vector<fs::path> source_paths = collectSourceImages();
 	if (source_paths.empty()) {
-		GTEST_SKIP() << "No JPEG source images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or add *.jpg under data/jpeg_benchmark";
+		GTEST_SKIP() << "No JPEG source images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or allow lazy download into .local_data/gpgpu_jpeg_benchmark_real";
 	}
 
 	std::vector<GpuPreparedColorImage> prepared_images;
@@ -1292,7 +1276,7 @@ TEST(vulkan, jpegDecodeGpuColorMatchesCpu)
 {
 	std::vector<fs::path> source_paths = collectSourceImages();
 	if (source_paths.empty()) {
-		GTEST_SKIP() << "No JPEG source images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or add *.jpg under data/jpeg_benchmark";
+		GTEST_SKIP() << "No JPEG source images found. Set GPGPU_VULKAN_JPEG_BENCHMARK_DIR or allow lazy download into .local_data/gpgpu_jpeg_benchmark_real";
 	}
 
 	std::vector<GpuPreparedColorImage> prepared_images;
