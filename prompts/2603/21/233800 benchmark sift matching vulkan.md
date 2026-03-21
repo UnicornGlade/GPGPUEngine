@@ -29,6 +29,14 @@
   - query descriptor держится в регистрах;
   - train tile кладётся в shared memory;
   - сравнение добавлено в тот же benchmark рядом с brute-force и исходным GEMM-like.
+- Добавлен ещё один отдельный kernel `sift_match_gemm_like_fp16_packed.comp`:
+  - descriptors упаковываются на host в `fp16` по две компоненты в один `uint32_t`;
+  - shader использует `unpackHalf2x16(...)`;
+  - корректность проверяется против CPU brute-force на тех же уже-квантованных `fp16` данных;
+  - дополнительно логгируется, сколько top-1 результатов отличается от исходного `fp32` reference.
+- Synthetic descriptors переведены на RootSIFT normalization:
+  - случайные неотрицательные компоненты;
+  - `L1 normalize -> sqrt`.
 - Новый kernel проверен:
   - на размере `2048 x 2048`;
   - на полном размере `40000 x 40000` на RTX 4090.
@@ -45,4 +53,12 @@
   - Vulkan brute-force local: `~99.6 ms`, `~4112 GFLOPS`
   - Vulkan GEMM-like: `~59.3 ms`, `~6908 GFLOPS`
   - Vulkan GEMM-like vec4: `~29.9 ms`, `~13688 GFLOPS`
+- После добавления `fp16 packed` kernel и RootSIFT normalization на RTX 4090 для `40000 x 40000` получены ориентировочно:
+  - CPU brute-force RootSIFT fp32: `~5.15 s`, `~79.5 GFLOPS`
+  - CPU brute-force RootSIFT fp16-quantized: `~5.69 s`, `~72.0 GFLOPS`
+  - CPU fp16 drift vs fp32: `192 / 40000` (`~0.48%`) top-1 differences
+  - Vulkan brute-force local: `~99.9 ms`, `~4099 GFLOPS`
+  - Vulkan GEMM-like fp16 packed: `~39.2 ms`, `~10453 GFLOPS`, top-1 differences vs fp32: `192 / 40000` (`~0.48%`)
+  - Vulkan GEMM-like fp32: `~60.3 ms`, `~6794 GFLOPS`
+  - Vulkan GEMM-like vec4 fp32: `~32.0 ms`, `~12808 GFLOPS`
 - В текущем driver/device config тест логгирует `cooperative_matrix_fp32=no`, то есть GEMM-like путь сейчас реализован как blocked FMA kernel, без активированного fp32 cooperative-matrix path.

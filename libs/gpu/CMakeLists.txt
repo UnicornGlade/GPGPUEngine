@@ -264,6 +264,7 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_04_scatter.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_04_scatter_portable.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_bruteforce_local.comp VULKAN_DEFINES)
+	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like_fp16_packed.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like_vec4.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/write_value_at_index.comp VULKAN_DEFINES)

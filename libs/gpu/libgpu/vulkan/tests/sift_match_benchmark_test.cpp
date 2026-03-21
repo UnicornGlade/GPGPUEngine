@@ -29,6 +29,7 @@ constexpr uint32_t kDescriptorDim = 128u;
 constexpr uint32_t kDefaultDescriptorCount = 40000u;
 constexpr uint32_t kDefaultBenchmarkIterations = 3u;
 constexpr uint32_t kBruteforceLocalGroupSize = 64u;
+constexpr uint32_t kFp16PackedGroupSize = 32u;
 constexpr uint32_t kGemmLikeGroupSize = 16u;
 constexpr uint32_t kGemmLikeVec4GroupSize = 32u;
 
@@ -96,24 +97,123 @@ float computeDot(const std::vector<float> &queries,
 	return score;
 }
 
-std::vector<float> makeRandomNormalizedDescriptors(uint32_t descriptor_count, uint32_t seed)
+uint16_t floatToHalfBits(float value)
+{
+	union {
+		float f;
+		uint32_t u;
+	} bits = {value};
+
+	const uint32_t sign = (bits.u >> 16u) & 0x8000u;
+	int32_t exponent = static_cast<int32_t>((bits.u >> 23u) & 0xFFu) - 127 + 15;
+	uint32_t mantissa = bits.u & 0x7FFFFFu;
+
+	if (exponent <= 0) {
+		if (exponent < -10) {
+			return static_cast<uint16_t>(sign);
+		}
+		mantissa |= 0x800000u;
+		const uint32_t shifted = mantissa >> static_cast<uint32_t>(1 - exponent + 13);
+		const uint32_t rounded = shifted + ((mantissa >> static_cast<uint32_t>(1 - exponent + 12)) & 1u);
+		return static_cast<uint16_t>(sign | rounded);
+	}
+	if (exponent >= 31) {
+		return static_cast<uint16_t>(sign | 0x7C00u);
+	}
+
+	const uint32_t rounded_mantissa = mantissa + 0x1000u;
+	if (rounded_mantissa & 0x800000u) {
+		mantissa = 0u;
+		++exponent;
+		if (exponent >= 31) {
+			return static_cast<uint16_t>(sign | 0x7C00u);
+		}
+	} else {
+		mantissa = rounded_mantissa;
+	}
+
+	return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10u) | (mantissa >> 13u));
+}
+
+float halfBitsToFloat(uint16_t value)
+{
+	const uint32_t sign = (static_cast<uint32_t>(value & 0x8000u)) << 16u;
+	const uint32_t exponent = (value >> 10u) & 0x1Fu;
+	const uint32_t mantissa = value & 0x03FFu;
+
+	uint32_t float_bits = 0u;
+	if (exponent == 0u) {
+		if (mantissa == 0u) {
+			float_bits = sign;
+		} else {
+			uint32_t mantissa_norm = mantissa;
+			int32_t exponent_norm = -14;
+			while ((mantissa_norm & 0x0400u) == 0u) {
+				mantissa_norm <<= 1u;
+				--exponent_norm;
+			}
+			mantissa_norm &= 0x03FFu;
+			float_bits = sign
+					   | (static_cast<uint32_t>(exponent_norm + 127) << 23u)
+					   | (mantissa_norm << 13u);
+		}
+	} else if (exponent == 0x1Fu) {
+		float_bits = sign | 0x7F800000u | (mantissa << 13u);
+	} else {
+		float_bits = sign
+				   | ((exponent + 112u) << 23u)
+				   | (mantissa << 13u);
+	}
+
+	union {
+		uint32_t u;
+		float f;
+	} bits = {float_bits};
+	return bits.f;
+}
+
+std::vector<uint32_t> packDescriptorsToFp16(const std::vector<float> &descriptors)
+{
+	rassert(descriptors.size() % 2u == 0u, 2026032123594300001, descriptors.size());
+	std::vector<uint32_t> packed(descriptors.size() / 2u, 0u);
+	for (size_t i = 0; i < packed.size(); ++i) {
+		const uint16_t lo = floatToHalfBits(descriptors[2u * i + 0u]);
+		const uint16_t hi = floatToHalfBits(descriptors[2u * i + 1u]);
+		packed[i] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16u);
+	}
+	return packed;
+}
+
+std::vector<float> unpackDescriptorsFromFp16(const std::vector<uint32_t> &packed)
+{
+	std::vector<float> descriptors(packed.size() * 2u, 0.0f);
+	for (size_t i = 0; i < packed.size(); ++i) {
+		const uint16_t lo = static_cast<uint16_t>(packed[i] & 0xFFFFu);
+		const uint16_t hi = static_cast<uint16_t>(packed[i] >> 16u);
+		descriptors[2u * i + 0u] = halfBitsToFloat(lo);
+		descriptors[2u * i + 1u] = halfBitsToFloat(hi);
+	}
+	return descriptors;
+}
+
+std::vector<float> makeRandomRootSiftDescriptors(uint32_t descriptor_count, uint32_t seed)
 {
 	std::mt19937 rng(seed);
-	std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+	std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
 	std::vector<float> descriptors(static_cast<size_t>(descriptor_count) * kDescriptorDim, 0.0f);
 	for (uint32_t descriptor_index = 0; descriptor_index < descriptor_count; ++descriptor_index) {
 		const size_t offset = static_cast<size_t>(descriptor_index) * kDescriptorDim;
-		float norm2 = 0.0f;
+		float sum = 0.0f;
 		for (uint32_t component = 0; component < kDescriptorDim; ++component) {
 			const float value = dist(rng);
 			descriptors[offset + component] = value;
-			norm2 += value * value;
+			sum += value;
 		}
 
-		const float inv_norm = 1.0f / std::sqrt(std::max(norm2, 1e-12f));
+		const float inv_l1 = 1.0f / std::max(sum, 1e-12f);
 		for (uint32_t component = 0; component < kDescriptorDim; ++component) {
-			descriptors[offset + component] *= inv_norm;
+			descriptors[offset + component] = std::sqrt(descriptors[offset + component] * inv_l1);
 		}
 	}
 
@@ -218,6 +318,61 @@ GpuBenchmarkResult runGpuMatcher(avk2::KernelSource &kernel,
 	return result;
 }
 
+GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
+										   gpu::Context &context,
+										   uint32_t group_size,
+										   const std::vector<uint32_t> &queries_packed,
+										   const std::vector<uint32_t> &trains_packed,
+										   uint32_t n_queries,
+										   uint32_t n_trains,
+										   uint32_t benchmark_iterations)
+{
+	GpuBenchmarkResult result;
+
+	gpu::gpu_mem_32u queries_gpu(queries_packed.size());
+	gpu::gpu_mem_32u trains_gpu(trains_packed.size());
+	gpu::gpu_mem_32u best_indices_gpu(n_queries);
+	gpu::gpu_mem_32f best_scores_gpu(n_queries);
+
+	{
+		timer upload_timer;
+		profiling::ScopedRange scope("sift match fp16 upload", 0xFF236FA1);
+		queries_gpu.writeN(queries_packed.data(), queries_packed.size());
+		trains_gpu.writeN(trains_packed.data(), trains_packed.size());
+		context.vk()->waitForAllInflightComputeLaunches();
+		result.upload_seconds = upload_timer.elapsed();
+	}
+
+	MatchPushConstants params{n_queries, n_trains};
+	const gpu::WorkSize work_size = gpu::WorkSize1DTo2D(group_size, n_queries);
+
+	{
+		profiling::ScopedRange scope("sift match fp16 warmup", 0xFF7E57C2);
+		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+		context.vk()->waitForAllInflightComputeLaunches();
+	}
+
+	for (uint32_t iter = 0; iter < benchmark_iterations; ++iter) {
+		timer compute_timer;
+		{
+			profiling::ScopedRange scope("sift match fp16 compute", 0xFF2E8B57);
+			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+			context.vk()->waitForAllInflightComputeLaunches();
+		}
+		result.compute_seconds.push_back(compute_timer.elapsed());
+	}
+
+	{
+		timer readback_timer;
+		profiling::ScopedRange scope("sift match fp16 readback", 0xFFB9770E);
+		result.matches.indices = best_indices_gpu.readVector(n_queries);
+		result.matches.scores = best_scores_gpu.readVector(n_queries);
+		result.readback_seconds = readback_timer.elapsed();
+	}
+
+	return result;
+}
+
 void expectCloseToCpuReference(const std::string &label,
 							   const MatchResult &cpu_reference,
 							   const MatchResult &gpu_result,
@@ -289,7 +444,7 @@ void logCpuBenchmark(const CpuBenchmarkResult &result,
 					 uint32_t n_trains,
 					 uint32_t thread_count)
 {
-	std::cout << "CPU brute-force SIFT matching: queries=" << n_queries
+	std::cout << "CPU brute-force RootSIFT matching: queries=" << n_queries
 			  << " trains=" << n_trains
 			  << " dim=" << kDescriptorDim
 			  << " threads=" << thread_count
@@ -318,6 +473,25 @@ void logGpuBenchmark(const std::string &label,
 	std::cout << "  achieved throughput:      " << computeGflops(n_queries, n_trains, median_seconds) << " GFLOPS" << std::endl;
 }
 
+void logTop1DifferencesVsFp32(const std::string &label,
+							  const MatchResult &fp32_reference,
+							  const MatchResult &candidate)
+{
+	rassert(fp32_reference.indices.size() == candidate.indices.size(), 2026032200110400001, fp32_reference.indices.size(), candidate.indices.size());
+	size_t different_count = 0;
+	for (size_t i = 0; i < fp32_reference.indices.size(); ++i) {
+		if (fp32_reference.indices[i] != candidate.indices[i]) {
+			++different_count;
+		}
+	}
+
+	const double total = static_cast<double>(fp32_reference.indices.size());
+	const double percent = total > 0.0 ? 100.0 * static_cast<double>(different_count) / total : 0.0;
+	std::cout << "  top-1 differences vs fp32: " << different_count
+			  << " / " << fp32_reference.indices.size()
+			  << " (" << percent << "%)" << std::endl;
+}
+
 } // namespace
 
 TEST(vulkan, siftMatchBenchmark)
@@ -337,8 +511,12 @@ TEST(vulkan, siftMatchBenchmark)
 	const uint32_t benchmark_iterations = getenvU32("GPGPU_VULKAN_SIFT_MATCH_ITERS", kDefaultBenchmarkIterations);
 	const uint32_t cpu_thread_count = selectCpuThreadCount();
 
-	std::vector<float> queries = makeRandomNormalizedDescriptors(descriptor_count, 239u);
-	std::vector<float> trains = makeRandomNormalizedDescriptors(descriptor_count, 997u);
+	std::vector<float> queries = makeRandomRootSiftDescriptors(descriptor_count, 239u);
+	std::vector<float> trains = makeRandomRootSiftDescriptors(descriptor_count, 997u);
+	const std::vector<uint32_t> queries_fp16_packed = packDescriptorsToFp16(queries);
+	const std::vector<uint32_t> trains_fp16_packed = packDescriptorsToFp16(trains);
+	const std::vector<float> queries_fp16 = unpackDescriptorsFromFp16(queries_fp16_packed);
+	const std::vector<float> trains_fp16 = unpackDescriptorsFromFp16(trains_fp16_packed);
 
 	CpuBenchmarkResult cpu_reference;
 	{
@@ -346,6 +524,15 @@ TEST(vulkan, siftMatchBenchmark)
 		cpu_reference = bruteForceCpuReference(queries, trains, descriptor_count, descriptor_count, cpu_thread_count);
 	}
 	logCpuBenchmark(cpu_reference, descriptor_count, descriptor_count, cpu_thread_count);
+
+	CpuBenchmarkResult cpu_reference_fp16;
+	{
+		profiling::ScopedRange scope("sift match cpu fp16 reference", 0xFF6C5CE7);
+		cpu_reference_fp16 = bruteForceCpuReference(queries_fp16, trains_fp16, descriptor_count, descriptor_count, cpu_thread_count);
+	}
+	logCpuBenchmark(cpu_reference_fp16, descriptor_count, descriptor_count, cpu_thread_count);
+	std::cout << "CPU fp16 quantized reference drift:" << std::endl;
+	logTop1DifferencesVsFp32("cpu fp16 vs fp32", cpu_reference.matches, cpu_reference_fp16.matches);
 
 	size_t tested_devices = 0;
 	for (size_t device_index = 0; device_index < devices.size(); ++device_index) {
@@ -360,6 +547,7 @@ TEST(vulkan, siftMatchBenchmark)
 		context.setMemoryGuardsChecksAfterKernels(false);
 
 		avk2::KernelSource brute_force_kernel(avk2::getSiftMatchBruteforceLocalKernel());
+		avk2::KernelSource fp16_packed_kernel(avk2::getSiftMatchGemmLikeFp16PackedKernel());
 		avk2::KernelSource gemm_like_kernel(avk2::getSiftMatchGemmLikeKernel());
 		avk2::KernelSource gemm_like_vec4_kernel(avk2::getSiftMatchGemmLikeVec4Kernel());
 		const bool has_fp32_coop_matrices = hasFp32CooperativeMatrices(devices[device_index]);
@@ -383,6 +571,27 @@ TEST(vulkan, siftMatchBenchmark)
 						descriptor_count,
 						descriptor_count,
 						has_fp32_coop_matrices);
+
+		const GpuBenchmarkResult fp16_packed_result = runGpuMatcherFp16Packed(fp16_packed_kernel,
+																	 context,
+																	 kFp16PackedGroupSize,
+																	 queries_fp16_packed,
+																	 trains_fp16_packed,
+																	 descriptor_count,
+																	 descriptor_count,
+																	 benchmark_iterations);
+		expectCloseToCpuReference("vk gemm-like fp16 packed matcher",
+								  cpu_reference_fp16.matches,
+								  fp16_packed_result.matches,
+								  queries_fp16,
+								  trains_fp16,
+								  descriptor_count);
+		logGpuBenchmark("Vulkan GEMM-like fp16 packed SIFT matcher",
+						fp16_packed_result,
+						descriptor_count,
+						descriptor_count,
+						has_fp32_coop_matrices);
+		logTop1DifferencesVsFp32("gpu fp16 vs fp32", cpu_reference.matches, fp16_packed_result.matches);
 
 		const GpuBenchmarkResult gemm_like_result = runGpuMatcher(gemm_like_kernel,
 																 context,

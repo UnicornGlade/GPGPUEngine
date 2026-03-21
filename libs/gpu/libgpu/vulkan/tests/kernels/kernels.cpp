@@ -30,6 +30,7 @@
 #include "generated_kernels/reduce_sum_u8_to_u32_comp.h"
 #include "generated_kernels/reduce_sum_u32_to_u32_comp.h"
 #include "generated_kernels/sift_match_bruteforce_local_comp.h"
+#include "generated_kernels/sift_match_gemm_like_fp16_packed_comp.h"
 #include "generated_kernels/sift_match_gemm_like_comp.h"
 #include "generated_kernels/sift_match_gemm_like_vec4_comp.h"
 #include "generated_kernels/write_value_at_index_comp.h"
@@ -131,6 +132,9 @@ namespace avk2 {
 	}
 	const ProgramBinaries& getSiftMatchBruteforceLocalKernel() {
 		return vulkan_binaries_sift_match_bruteforce_local_comp;
+	}
+	const ProgramBinaries& getSiftMatchGemmLikeFp16PackedKernel() {
+		return vulkan_binaries_sift_match_gemm_like_fp16_packed_comp;
 	}
 	const ProgramBinaries& getSiftMatchGemmLikeKernel() {
 		return vulkan_binaries_sift_match_gemm_like_comp;
