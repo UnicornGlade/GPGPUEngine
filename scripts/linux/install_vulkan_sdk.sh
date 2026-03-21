@@ -24,6 +24,9 @@ vulkan_headers_version=${vulkan_sdk_version}
 vulkan_loader_version=${vulkan_sdk_version}
 vulkan_spirv_reflect_version=${vulkan_sdk_version}
 vulkan_validation_layers_version=${vulkan_sdk_version}
+shaderc_version=2026.1
+spirv_sdk_version=1.4.321.0
+glslang_version=16.0.0
 
 echo "Downloading sources"
 wget https://github.com/google/googletest/archive/refs/tags/release-${googletest_version}.zip
@@ -32,7 +35,7 @@ wget https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/v${vulkan_l
 wget https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/19b940e864bd3a5afb3c79e3c6788869d01a19eb/include/vk_mem_alloc.h -O vk_mem_alloc.h
 wget https://github.com/KhronosGroup/Vulkan-ValidationLayers/archive/refs/tags/v${vulkan_validation_layers_version}.zip -O Vulkan-ValidationLayers-${vulkan_validation_layers_version}.zip
 wget https://github.com/KhronosGroup/SPIRV-Reflect/archive/refs/tags/vulkan-sdk-${vulkan_spirv_reflect_version}.0.zip -O SPIRV-Reflect-${vulkan_spirv_reflect_version}.zip
-wget https://github.com/google/shaderc/archive/v2025.4.zip
+wget https://github.com/google/shaderc/archive/v${shaderc_version}.zip -O shaderc-${shaderc_version}.zip
 
 echo "Installing googletest"
 unzip release-${googletest_version}.zip
@@ -71,25 +74,29 @@ mkdir ${install_prefix}/include/vma
 mv vk_mem_alloc.h ${install_prefix}/include/vma/vk_mem_alloc.h
 
 echo "Installing glslc shaders compiler"
-unzip v2025.4.zip
-cd shaderc-2025.4/third_party
-wget https://github.com/KhronosGroup/SPIRV-Headers/archive/vulkan-sdk-1.4.321.0.zip
-unzip vulkan-sdk-1.4.321.0.zip
-mv SPIRV-Headers-vulkan-sdk-1.4.321.0 spirv-headers
-wget https://github.com/KhronosGroup/SPIRV-Tools/archive/vulkan-sdk-1.4.321.0.zip
-unzip vulkan-sdk-1.4.321.0.zip.1
-mv SPIRV-Tools-vulkan-sdk-1.4.321.0 spirv-tools
-wget https://github.com/KhronosGroup/glslang/archive/16.0.0.zip
-unzip 16.0.0.zip
-mv glslang-16.0.0 glslang
+unzip shaderc-${shaderc_version}.zip
+rm shaderc-${shaderc_version}.zip
+cd shaderc-${shaderc_version}/third_party
+wget https://github.com/KhronosGroup/SPIRV-Headers/archive/vulkan-sdk-${spirv_sdk_version}.zip -O spirv-headers-${spirv_sdk_version}.zip
+unzip spirv-headers-${spirv_sdk_version}.zip
+mv SPIRV-Headers-vulkan-sdk-${spirv_sdk_version} spirv-headers
+wget https://github.com/KhronosGroup/SPIRV-Tools/archive/vulkan-sdk-${spirv_sdk_version}.zip -O spirv-tools-${spirv_sdk_version}.zip
+unzip spirv-tools-${spirv_sdk_version}.zip
+mv SPIRV-Tools-vulkan-sdk-${spirv_sdk_version} spirv-tools
+wget https://github.com/KhronosGroup/glslang/archive/${glslang_version}.zip -O glslang-${glslang_version}.zip
+unzip glslang-${glslang_version}.zip
+mv glslang-${glslang_version} glslang
 cd ..
 mkdir build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=TRUE
 make -j${njobs}
-cp glslc/glslc /usr/bin/
+sudo cp glslc/glslc /usr/bin/
+if [ -f glslang/glslangValidator ]; then
+  sudo cp glslang/glslangValidator /usr/bin/
+fi
 cd ../..
-rm -rf shaderc-2025.4
+rm -rf shaderc-${shaderc_version}
 
 if [ "$SKIP_VALIDATION_LAYERS" -eq 0 ]; then
   echo "Installing Vulkan Validation Layers"

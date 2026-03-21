@@ -267,6 +267,8 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like_fp16_packed.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like_vec4.comp VULKAN_DEFINES)
+	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_tensor_cores.comp VULKAN_DEFINES)
+	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_tensor_cores_nv.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/write_value_at_index.comp VULKAN_DEFINES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_interpolation.comp VULKAN_DEFINES TEMPLATE_DEFINES_NC_TYPES TEMPLATE_SUFFIXES_NC_TYPES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_conversion_from_float_to_T.comp VULKAN_DEFINES TEMPLATE_DEFINES_TYPES TEMPLATE_SUFFIXES_TYPES)

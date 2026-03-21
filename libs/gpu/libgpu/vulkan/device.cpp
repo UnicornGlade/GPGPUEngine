@@ -236,27 +236,11 @@ std::vector<std::tuple<DataType, DataType, size_t, size_t, size_t>> avk2::Device
     // (MulDataType, SumDataType, M, N, K)
     std::vector<std::tuple<DataType, DataType, size_t, size_t, size_t>> out;
 
-    if (!supportsExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME))
-        return out;
-
     auto context_instance = avk2::InstanceContext::getGlobalInstanceContext();
 
     std::vector<vk::raii::PhysicalDevice> all_vk_devices = context_instance->instance().enumeratePhysicalDevices();
     rassert(device_id_vulkan < all_vk_devices.size(), 6537653743, device_id_vulkan, all_vk_devices.size());
     vk::raii::PhysicalDevice vk_device = all_vk_devices[device_id_vulkan];
-
-    // Check feature bit to ensure the extension is actually usable
-    // (some drivers may expose the extension but not the feature).
-    auto feats2 = vk_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
-    const auto coopFeat = feats2.get<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
-    if (!coopFeat.cooperativeMatrix)
-        return out;
-
-    // Enumerate all supported (A,B,C,Result) + sizes (M,N,K) for subgroup scope.
-    // We expose entries keyed by the RESULT type because that is what user code
-    // will typically store back to memory (e.g., FP16xFP16 -> FP32 accumulator/result).
-    std::vector<vk::CooperativeMatrixPropertiesKHR> props;
-    props = vk_device.getCooperativeMatrixPropertiesKHR();
 
     // Map result component type -> our DataType.
     auto mapToDataType = [](vk::ComponentTypeKHR t) -> std::optional<DataType> {
@@ -275,30 +259,52 @@ std::vector<std::tuple<DataType, DataType, size_t, size_t, size_t>> avk2::Device
     // Use a set to deduplicate possible duplicates (some drivers may list repeats).
     std::set<std::tuple<DataType, DataType, size_t, size_t, size_t>> uniq;
 
-    for (const auto& p : props) {
-        // Only expose subgroup-scope modes; those are the baseline for KHR.
-        if (p.scope != vk::ScopeKHR::eSubgroup)
-            continue;
+    if (supportsExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)) {
+        auto feats2 = vk_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
+        const auto coopFeat = feats2.get<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
+        if (coopFeat.cooperativeMatrix) {
+            const std::vector<vk::CooperativeMatrixPropertiesKHR> props = vk_device.getCooperativeMatrixPropertiesKHR();
+            for (const auto& p : props) {
+                if (p.scope != vk::ScopeKHR::eSubgroup)
+                    continue;
 
-        auto aType = mapToDataType(p.AType);
-        auto bType = mapToDataType(p.BType);
-        auto cType = mapToDataType(p.CType);
-        auto rType = mapToDataType(p.ResultType);
+                auto aType = mapToDataType(p.AType);
+                auto bType = mapToDataType(p.BType);
+                auto cType = mapToDataType(p.CType);
+                auto rType = mapToDataType(p.ResultType);
 
-        if (!aType || !bType || !cType || !rType)
-            continue;
+                if (!aType || !bType || !cType || !rType)
+                    continue;
+                if (*aType != *bType || *cType != *rType)
+                    continue;
 
-        DataType mulType = *aType;
-        // A and B should be of the same type (multiply type)
-        if (*aType != *bType)
-            continue;
+                uniq.emplace(*aType, *rType, static_cast<size_t>(p.MSize), static_cast<size_t>(p.NSize), static_cast<size_t>(p.KSize));
+            }
+        }
+    }
 
-        DataType sumType = *rType;
-        // C and Result should be of the same type (sum/addition type)
-        if (*cType != *rType)
-            continue;
+    if (supportsExtension(VK_NV_COOPERATIVE_MATRIX_EXTENSION_NAME)) {
+        auto feats2 = vk_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceCooperativeMatrixFeaturesNV>();
+        const auto coopFeat = feats2.get<vk::PhysicalDeviceCooperativeMatrixFeaturesNV>();
+        if (coopFeat.cooperativeMatrix) {
+            const std::vector<vk::CooperativeMatrixPropertiesNV> props = vk_device.getCooperativeMatrixPropertiesNV();
+            for (const auto& p : props) {
+                if (p.scope != vk::ScopeNV::eSubgroup)
+                    continue;
 
-        uniq.emplace(mulType, sumType, static_cast<size_t>(p.MSize), static_cast<size_t>(p.NSize), static_cast<size_t>(p.KSize));
+                auto aType = mapToDataType(static_cast<vk::ComponentTypeKHR>(p.AType));
+                auto bType = mapToDataType(static_cast<vk::ComponentTypeKHR>(p.BType));
+                auto cType = mapToDataType(static_cast<vk::ComponentTypeKHR>(p.CType));
+                auto dType = mapToDataType(static_cast<vk::ComponentTypeKHR>(p.DType));
+
+                if (!aType || !bType || !cType || !dType)
+                    continue;
+                if (*aType != *bType || *cType != *dType)
+                    continue;
+
+                uniq.emplace(*aType, *dType, static_cast<size_t>(p.MSize), static_cast<size_t>(p.NSize), static_cast<size_t>(p.KSize));
+            }
+        }
     }
 
     out.assign(uniq.begin(), uniq.end());

@@ -55,6 +55,12 @@ struct MatchPushConstants {
 	uint32_t n_trains;
 };
 
+enum class TensorCoreMode {
+	None,
+	Khr,
+	Nv,
+};
+
 uint32_t getenvU32(const char *name, uint32_t default_value)
 {
 	const char *value = std::getenv(name);
@@ -180,6 +186,15 @@ std::vector<uint32_t> packDescriptorsToFp16(const std::vector<float> &descriptor
 		const uint16_t lo = floatToHalfBits(descriptors[2u * i + 0u]);
 		const uint16_t hi = floatToHalfBits(descriptors[2u * i + 1u]);
 		packed[i] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16u);
+	}
+	return packed;
+}
+
+std::vector<uint16_t> packDescriptorsToFp16Scalar(const std::vector<float> &descriptors)
+{
+	std::vector<uint16_t> packed(descriptors.size(), 0u);
+	for (size_t i = 0; i < descriptors.size(); ++i) {
+		packed[i] = floatToHalfBits(descriptors[i]);
 	}
 	return packed;
 }
@@ -373,6 +388,62 @@ GpuBenchmarkResult runGpuMatcherFp16Packed(avk2::KernelSource &kernel,
 	return result;
 }
 
+GpuBenchmarkResult runGpuMatcherFp16Scalar(avk2::KernelSource &kernel,
+										   gpu::Context &context,
+										   uint32_t group_size,
+										   uint32_t work_items,
+										   const std::vector<uint16_t> &queries_fp16,
+										   const std::vector<uint16_t> &trains_fp16,
+										   uint32_t n_queries,
+										   uint32_t n_trains,
+										   uint32_t benchmark_iterations)
+{
+	GpuBenchmarkResult result;
+
+	gpu::gpu_mem_16u queries_gpu(queries_fp16.size());
+	gpu::gpu_mem_16u trains_gpu(trains_fp16.size());
+	gpu::gpu_mem_32u best_indices_gpu(n_queries);
+	gpu::gpu_mem_32f best_scores_gpu(n_queries);
+
+	{
+		timer upload_timer;
+		profiling::ScopedRange scope("sift match fp16 scalar upload", 0xFF236FA1);
+		queries_gpu.writeN(queries_fp16.data(), queries_fp16.size());
+		trains_gpu.writeN(trains_fp16.data(), trains_fp16.size());
+		context.vk()->waitForAllInflightComputeLaunches();
+		result.upload_seconds = upload_timer.elapsed();
+	}
+
+	MatchPushConstants params{n_queries, n_trains};
+	const gpu::WorkSize work_size = gpu::WorkSize1DTo2D(group_size, work_items);
+
+	{
+		profiling::ScopedRange scope("sift match tensor warmup", 0xFF7E57C2);
+		kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+		context.vk()->waitForAllInflightComputeLaunches();
+	}
+
+	for (uint32_t iter = 0; iter < benchmark_iterations; ++iter) {
+		timer compute_timer;
+		{
+			profiling::ScopedRange scope("sift match tensor compute", 0xFF2E8B57);
+			kernel.exec(params, work_size, queries_gpu, trains_gpu, best_indices_gpu, best_scores_gpu);
+			context.vk()->waitForAllInflightComputeLaunches();
+		}
+		result.compute_seconds.push_back(compute_timer.elapsed());
+	}
+
+	{
+		timer readback_timer;
+		profiling::ScopedRange scope("sift match tensor readback", 0xFFB9770E);
+		result.matches.indices = best_indices_gpu.readVector(n_queries);
+		result.matches.scores = best_scores_gpu.readVector(n_queries);
+		result.readback_seconds = readback_timer.elapsed();
+	}
+
+	return result;
+}
+
 void expectCloseToCpuReference(const std::string &label,
 							   const MatchResult &cpu_reference,
 							   const MatchResult &gpu_result,
@@ -437,6 +508,34 @@ bool hasFp32CooperativeMatrices(const gpu::Device &device)
 		}
 	}
 	return false;
+}
+
+bool hasFp16ToFp32CooperativeMatrices16x16x16(const gpu::Device &device)
+{
+	avk2::Device vk_device(device.device_id_vulkan);
+	if (!vk_device.init(true)) {
+		return false;
+	}
+
+	return vk_device.isCooperativeMatrixSizeSupported(DataType16f, DataType32f, 16u, 16u, 16u);
+}
+
+TensorCoreMode detectTensorCoreMode(const gpu::Device &device)
+{
+	avk2::Device vk_device(device.device_id_vulkan);
+	if (!vk_device.init(true)) {
+		return TensorCoreMode::None;
+	}
+	if (!vk_device.isCooperativeMatrixSizeSupported(DataType16f, DataType32f, 16u, 16u, 16u)) {
+		return TensorCoreMode::None;
+	}
+	if (vk_device.supportsExtension("VK_KHR_cooperative_matrix")) {
+		return TensorCoreMode::Khr;
+	}
+	if (vk_device.supportsExtension("VK_NV_cooperative_matrix")) {
+		return TensorCoreMode::Nv;
+	}
+	return TensorCoreMode::None;
 }
 
 void logCpuBenchmark(const CpuBenchmarkResult &result,
@@ -515,6 +614,8 @@ TEST(vulkan, siftMatchBenchmark)
 	std::vector<float> trains = makeRandomRootSiftDescriptors(descriptor_count, 997u);
 	const std::vector<uint32_t> queries_fp16_packed = packDescriptorsToFp16(queries);
 	const std::vector<uint32_t> trains_fp16_packed = packDescriptorsToFp16(trains);
+	const std::vector<uint16_t> queries_fp16_scalar = packDescriptorsToFp16Scalar(queries);
+	const std::vector<uint16_t> trains_fp16_scalar = packDescriptorsToFp16Scalar(trains);
 	const std::vector<float> queries_fp16 = unpackDescriptorsFromFp16(queries_fp16_packed);
 	const std::vector<float> trains_fp16 = unpackDescriptorsFromFp16(trains_fp16_packed);
 
@@ -550,7 +651,10 @@ TEST(vulkan, siftMatchBenchmark)
 		avk2::KernelSource fp16_packed_kernel(avk2::getSiftMatchGemmLikeFp16PackedKernel());
 		avk2::KernelSource gemm_like_kernel(avk2::getSiftMatchGemmLikeKernel());
 		avk2::KernelSource gemm_like_vec4_kernel(avk2::getSiftMatchGemmLikeVec4Kernel());
-		const bool has_fp32_coop_matrices = hasFp32CooperativeMatrices(devices[device_index]);
+			avk2::KernelSource tensor_core_kernel(avk2::getSiftMatchTensorCoresKernel());
+			avk2::KernelSource tensor_core_kernel_nv(avk2::getSiftMatchTensorCoresNvKernel());
+			const bool has_fp32_coop_matrices = hasFp32CooperativeMatrices(devices[device_index]);
+			const TensorCoreMode tensor_core_mode = detectTensorCoreMode(devices[device_index]);
 
 		const GpuBenchmarkResult brute_force_result = runGpuMatcher(brute_force_kernel,
 																	 context,
@@ -592,6 +696,39 @@ TEST(vulkan, siftMatchBenchmark)
 						descriptor_count,
 						has_fp32_coop_matrices);
 		logTop1DifferencesVsFp32("gpu fp16 vs fp32", cpu_reference.matches, fp16_packed_result.matches);
+
+			if (tensor_core_mode != TensorCoreMode::None) {
+				const uint32_t tensor_work_items = ((descriptor_count + 15u) / 16u) * 32u;
+				avk2::KernelSource &selected_tensor_kernel = tensor_core_mode == TensorCoreMode::Khr
+					? tensor_core_kernel
+					: tensor_core_kernel_nv;
+				const std::string tensor_label = tensor_core_mode == TensorCoreMode::Khr
+					? "Vulkan tensor-core RootSIFT matcher (KHR)"
+					: "Vulkan tensor-core RootSIFT matcher (NV)";
+				const GpuBenchmarkResult tensor_core_result = runGpuMatcherFp16Scalar(selected_tensor_kernel,
+																			 context,
+																			 32u,
+																			 tensor_work_items,
+																		 queries_fp16_scalar,
+																		 trains_fp16_scalar,
+																		 descriptor_count,
+																		 descriptor_count,
+																		 benchmark_iterations);
+			expectCloseToCpuReference("vk tensor core matcher",
+									  cpu_reference_fp16.matches,
+									  tensor_core_result.matches,
+										  queries_fp16,
+										  trains_fp16,
+										  descriptor_count);
+				logGpuBenchmark(tensor_label,
+								tensor_core_result,
+								descriptor_count,
+								descriptor_count,
+								has_fp32_coop_matrices);
+				logTop1DifferencesVsFp32("gpu tensor core vs fp32", cpu_reference.matches, tensor_core_result.matches);
+			} else {
+				std::cout << "Vulkan tensor-core RootSIFT matcher: skipped (no fp16->fp32 16x16x16 cooperative matrix support via KHR/NV cooperative matrices)" << std::endl;
+			}
 
 		const GpuBenchmarkResult gemm_like_result = runGpuMatcher(gemm_like_kernel,
 																 context,

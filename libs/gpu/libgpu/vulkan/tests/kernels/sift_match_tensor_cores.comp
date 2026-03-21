@@ -1,0 +1,86 @@
+#version 450
+
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) readonly buffer QueriesIn {
+	float16_t queries[];
+};
+
+layout(std430, binding = 1) readonly buffer TrainsIn {
+	float16_t trains[];
+};
+
+layout(std430, binding = 2) writeonly buffer BestIndicesOut {
+	uint best_indices[];
+};
+
+layout(std430, binding = 3) writeonly buffer BestScoresOut {
+	float best_scores[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint n_queries;
+	uint n_trains;
+} params;
+
+const uint kTileM = 16u;
+const uint kTileN = 16u;
+const uint kTileK = 16u;
+const uint kDescriptorDim = 128u;
+
+shared float score_tile[kTileM * kTileN];
+
+void main()
+{
+	const uint subgroup_lane = gl_SubgroupInvocationID;
+	const uint tile_row = workGroup2DTo1D(gl_WorkGroupID);
+	const uint query_base = tile_row * kTileM;
+	const uint query_index = query_base + subgroup_lane;
+	const bool query_is_active = subgroup_lane < kTileM && query_index < params.n_queries;
+
+	float best_score = -3.402823466e38f;
+	uint best_index = 0u;
+
+	for (uint train_base = 0u; train_base < params.n_trains; train_base += kTileN) {
+		coopmat<float, gl_ScopeSubgroup, kTileM, kTileN, gl_MatrixUseAccumulator> acc =
+			coopmat<float, gl_ScopeSubgroup, kTileM, kTileN, gl_MatrixUseAccumulator>(0.0);
+
+		for (uint k_base = 0u; k_base < kDescriptorDim; k_base += kTileK) {
+			coopmat<float16_t, gl_ScopeSubgroup, kTileM, kTileK, gl_MatrixUseA> mat_a;
+			coopmat<float16_t, gl_ScopeSubgroup, kTileK, kTileN, gl_MatrixUseB> mat_b;
+
+			const uint query_offset = query_base * kDescriptorDim + k_base;
+			const uint train_offset = train_base * kDescriptorDim + k_base;
+			coopMatLoad(mat_a, queries, query_offset, kDescriptorDim, gl_CooperativeMatrixLayoutRowMajor);
+			coopMatLoad(mat_b, trains, train_offset, kDescriptorDim, gl_CooperativeMatrixLayoutColumnMajor);
+			acc = coopMatMulAdd(mat_a, mat_b, acc);
+		}
+
+		coopMatStore(acc, score_tile, 0u, kTileN, gl_CooperativeMatrixLayoutRowMajor);
+		barrier();
+
+		if (query_is_active) {
+			const uint tile_size = min(kTileN, params.n_trains - train_base);
+			for (uint tile_train = 0u; tile_train < tile_size; ++tile_train) {
+				const float score = score_tile[subgroup_lane * kTileN + tile_train];
+				if (score > best_score) {
+					best_score = score;
+					best_index = train_base + tile_train;
+				}
+			}
+		}
+		barrier();
+	}
+
+	if (query_is_active) {
+		best_indices[query_index] = best_index;
+		best_scores[query_index] = best_score;
+	}
+}

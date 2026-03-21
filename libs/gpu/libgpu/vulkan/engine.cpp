@@ -475,8 +475,30 @@ public:
 		// We require this feature to use std430 layout instead of std140
 		// Example of std140 drawback:
 		// - float array (used in FourierCorrectionVk) is x4 times bigger due to 16 bytes strides - https://www.reddit.com/r/vulkan/comments/u5jiws/glsl_std140_layout_for_arrays_of_scalars/
-		vk::PhysicalDeviceUniformBufferStandardLayoutFeatures buffer_std_layout_features(true);
-                void * pNextFeature = &buffer_std_layout_features;
+		void * pNextFeature = nullptr;
+
+		auto vulkan_features2 = physical_device_->getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan12Features>();
+		const vk::PhysicalDeviceVulkan11Features vulkan11_supported_features = vulkan_features2.get<vk::PhysicalDeviceVulkan11Features>();
+		const vk::PhysicalDeviceVulkan12Features vulkan12_supported_features = vulkan_features2.get<vk::PhysicalDeviceVulkan12Features>();
+
+		vk::PhysicalDeviceVulkan11Features vulkan11_enabled_features;
+		if (vulkan11_supported_features.storageBuffer16BitAccess) {
+			vulkan11_enabled_features.setStorageBuffer16BitAccess(true);
+		}
+		vulkan11_enabled_features.setPNext(pNextFeature);
+		pNextFeature = &vulkan11_enabled_features;
+
+		rassert(vulkan12_supported_features.uniformBufferStandardLayout, 2026032114202500001, device_info_.name);
+		vk::PhysicalDeviceVulkan12Features vulkan12_enabled_features;
+		vulkan12_enabled_features.setUniformBufferStandardLayout(true);
+		if (vulkan12_supported_features.shaderFloat16) {
+			vulkan12_enabled_features.setShaderFloat16(true);
+		}
+		if (vulkan12_supported_features.vulkanMemoryModel) {
+			vulkan12_enabled_features.setVulkanMemoryModel(true);
+		}
+		vulkan12_enabled_features.setPNext(pNextFeature);
+		pNextFeature = &vulkan12_enabled_features;
 
 		if (USE_NATIVE_ATOMIC_ADD_FLOAT) {
 			// We require VK_EXT_shader_atomic_float extension to use atomicAdd(float[], float),
@@ -501,14 +523,24 @@ public:
 		device_enabled_features2.setPNext(pNextFeature);
                 pNextFeature = &device_enabled_features2;
 
-                vk::PhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_features;
+                vk::PhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_features_khr;
                 if (device_info_.supportsExtension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)) {
                     device_enabled_extensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 
-                    cooperative_matrix_features.setCooperativeMatrix(true);
-                    cooperative_matrix_features.setCooperativeMatrixRobustBufferAccess(false); // it is not supported on NVIDIA RTX 4090
-                    cooperative_matrix_features.setPNext(pNextFeature);
-                    pNextFeature = &cooperative_matrix_features;
+                    cooperative_matrix_features_khr.setCooperativeMatrix(true);
+                    cooperative_matrix_features_khr.setCooperativeMatrixRobustBufferAccess(false); // it is not supported on NVIDIA RTX 4090
+                    cooperative_matrix_features_khr.setPNext(pNextFeature);
+                    pNextFeature = &cooperative_matrix_features_khr;
+                }
+
+                vk::PhysicalDeviceCooperativeMatrixFeaturesNV cooperative_matrix_features_nv;
+                if (device_info_.supportsExtension(VK_NV_COOPERATIVE_MATRIX_EXTENSION_NAME)) {
+                    device_enabled_extensions.push_back(VK_NV_COOPERATIVE_MATRIX_EXTENSION_NAME);
+
+                    cooperative_matrix_features_nv.setCooperativeMatrix(true);
+                    cooperative_matrix_features_nv.setCooperativeMatrixRobustBufferAccess(false); // it is not supported on NVIDIA RTX 4090
+                    cooperative_matrix_features_nv.setPNext(pNextFeature);
+                    pNextFeature = &cooperative_matrix_features_nv;
                 }
 
                 vk::PhysicalDeviceSubgroupSizeControlFeatures subgroup_size_control_features;
