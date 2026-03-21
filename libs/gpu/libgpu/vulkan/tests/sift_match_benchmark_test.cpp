@@ -30,6 +30,7 @@ constexpr uint32_t kDefaultDescriptorCount = 40000u;
 constexpr uint32_t kDefaultBenchmarkIterations = 3u;
 constexpr uint32_t kBruteforceLocalGroupSize = 64u;
 constexpr uint32_t kGemmLikeGroupSize = 16u;
+constexpr uint32_t kGemmLikeVec4GroupSize = 32u;
 
 struct MatchResult {
 	std::vector<uint32_t> indices;
@@ -360,6 +361,7 @@ TEST(vulkan, siftMatchBenchmark)
 
 		avk2::KernelSource brute_force_kernel(avk2::getSiftMatchBruteforceLocalKernel());
 		avk2::KernelSource gemm_like_kernel(avk2::getSiftMatchGemmLikeKernel());
+		avk2::KernelSource gemm_like_vec4_kernel(avk2::getSiftMatchGemmLikeVec4Kernel());
 		const bool has_fp32_coop_matrices = hasFp32CooperativeMatrices(devices[device_index]);
 
 		const GpuBenchmarkResult brute_force_result = runGpuMatcher(brute_force_kernel,
@@ -398,6 +400,26 @@ TEST(vulkan, siftMatchBenchmark)
 								  descriptor_count);
 		logGpuBenchmark("Vulkan GEMM-like SIFT matcher",
 						gemm_like_result,
+						descriptor_count,
+						descriptor_count,
+						has_fp32_coop_matrices);
+
+		const GpuBenchmarkResult gemm_like_vec4_result = runGpuMatcher(gemm_like_vec4_kernel,
+																	 context,
+																	 kGemmLikeVec4GroupSize,
+																	 queries,
+																	 trains,
+																	 descriptor_count,
+																	 descriptor_count,
+																	 benchmark_iterations);
+		expectCloseToCpuReference("vk gemm-like vec4 matcher",
+								  cpu_reference.matches,
+								  gemm_like_vec4_result.matches,
+								  queries,
+								  trains,
+								  descriptor_count);
+		logGpuBenchmark("Vulkan GEMM-like vec4 SIFT matcher",
+						gemm_like_vec4_result,
 						descriptor_count,
 						descriptor_count,
 						has_fp32_coop_matrices);

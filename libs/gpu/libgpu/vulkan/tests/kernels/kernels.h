@@ -33,6 +33,7 @@ namespace avk2 {
 	const ProgramBinaries& getReduceSumU32ToU32Kernel();
 	const ProgramBinaries& getSiftMatchBruteforceLocalKernel();
 	const ProgramBinaries& getSiftMatchGemmLikeKernel();
+	const ProgramBinaries& getSiftMatchGemmLikeVec4Kernel();
 	const ProgramBinaries& getWriteValueAtIndexKernel();
 	const ProgramBinaries& getYcbcr420ToRgbKernel();
 }

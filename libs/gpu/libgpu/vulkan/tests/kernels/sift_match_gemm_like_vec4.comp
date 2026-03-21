@@ -1,0 +1,86 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) readonly buffer QueriesIn {
+	vec4 queries4[];
+};
+
+layout(std430, binding = 1) readonly buffer TrainsIn {
+	vec4 trains4[];
+};
+
+layout(std430, binding = 2) writeonly buffer BestIndicesOut {
+	uint best_indices[];
+};
+
+layout(std430, binding = 3) writeonly buffer BestScoresOut {
+	float best_scores[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint n_queries;
+	uint n_trains;
+} params;
+
+const uint kDescriptorVec4 = 32u;
+const uint kTrainTile = 64u;
+
+shared vec4 train_tile[kTrainTile][kDescriptorVec4];
+
+void main()
+{
+	const uint query_index = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint local_index = gl_LocalInvocationID.x;
+	const bool query_is_active = query_index < params.n_queries;
+
+	vec4 query_registers[kDescriptorVec4];
+	if (query_is_active) {
+		const uint query_offset = query_index * kDescriptorVec4;
+		for (uint component4 = 0u; component4 < kDescriptorVec4; ++component4) {
+			query_registers[component4] = queries4[query_offset + component4];
+		}
+	} else {
+		for (uint component4 = 0u; component4 < kDescriptorVec4; ++component4) {
+			query_registers[component4] = vec4(0.0f);
+		}
+	}
+
+	float best_score = -3.402823466e38f;
+	uint best_index = 0u;
+
+	for (uint train_base = 0u; train_base < params.n_trains; train_base += kTrainTile) {
+		for (uint linear_index = local_index; linear_index < kTrainTile * kDescriptorVec4; linear_index += gl_WorkGroupSize.x) {
+			const uint tile_train = linear_index / kDescriptorVec4;
+			const uint component4 = linear_index % kDescriptorVec4;
+			const uint global_train_index = train_base + tile_train;
+			train_tile[tile_train][component4] =
+				global_train_index < params.n_trains
+					? trains4[global_train_index * kDescriptorVec4 + component4]
+					: vec4(0.0f);
+		}
+		barrier();
+
+		if (query_is_active) {
+			const uint tile_size = min(kTrainTile, params.n_trains - train_base);
+			for (uint tile_train = 0u; tile_train < tile_size; ++tile_train) {
+				float score = 0.0f;
+				for (uint component4 = 0u; component4 < kDescriptorVec4; ++component4) {
+					score += dot(query_registers[component4], train_tile[tile_train][component4]);
+				}
+				if (score > best_score) {
+					best_score = score;
+					best_index = train_base + tile_train;
+				}
+			}
+		}
+		barrier();
+	}
+
+	if (query_is_active) {
+		best_indices[query_index] = best_index;
+		best_scores[query_index] = best_score;
+	}
+}
