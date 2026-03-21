@@ -29,6 +29,8 @@
 #include "generated_kernels/reduce_sum_packed_rgb8_to_u32_comp.h"
 #include "generated_kernels/reduce_sum_u8_to_u32_comp.h"
 #include "generated_kernels/reduce_sum_u32_to_u32_comp.h"
+#include "generated_kernels/sift_match_bruteforce_local_comp.h"
+#include "generated_kernels/sift_match_gemm_like_comp.h"
 #include "generated_kernels/write_value_at_index_comp.h"
 #include "generated_kernels/ycbcr420_to_rgb_comp.h"
 
@@ -125,6 +127,12 @@ namespace avk2 {
 	}
 	const ProgramBinaries& getReduceSumU32ToU32Kernel() {
 		return vulkan_binaries_reduce_sum_u32_to_u32_comp;
+	}
+	const ProgramBinaries& getSiftMatchBruteforceLocalKernel() {
+		return vulkan_binaries_sift_match_bruteforce_local_comp;
+	}
+	const ProgramBinaries& getSiftMatchGemmLikeKernel() {
+		return vulkan_binaries_sift_match_gemm_like_comp;
 	}
 	const ProgramBinaries& getWriteValueAtIndexKernel() {
 		return vulkan_binaries_write_value_at_index_comp;

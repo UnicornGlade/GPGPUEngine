@@ -91,6 +91,7 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/radix_sort_test.cpp
         libgpu/vulkan/tests/rasterization_blending_test.cpp
         libgpu/vulkan/tests/rasterization_test.cpp
+        libgpu/vulkan/tests/sift_match_benchmark_test.cpp
         libgpu/lru_cache_test.cpp
         libgpu/device_test.cpp
         )
@@ -262,6 +263,8 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_03_global_prefixes_scan_accumulation_portable.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_04_scatter.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_04_scatter_portable.comp VULKAN_DEFINES)
+	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_bruteforce_local.comp VULKAN_DEFINES)
+	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/sift_match_gemm_like.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/write_value_at_index.comp VULKAN_DEFINES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_interpolation.comp VULKAN_DEFINES TEMPLATE_DEFINES_NC_TYPES TEMPLATE_SUFFIXES_NC_TYPES)
 compile_vulkan_templated(HEADERS libgpu/vulkan/tests/kernels/image_conversion_from_float_to_T.comp VULKAN_DEFINES TEMPLATE_DEFINES_TYPES TEMPLATE_SUFFIXES_TYPES)

@@ -1,0 +1,96 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 16) in;
+
+layout(std430, binding = 0) readonly buffer QueriesIn {
+	float queries[];
+};
+
+layout(std430, binding = 1) readonly buffer TrainsIn {
+	float trains[];
+};
+
+layout(std430, binding = 2) writeonly buffer BestIndicesOut {
+	uint best_indices[];
+};
+
+layout(std430, binding = 3) writeonly buffer BestScoresOut {
+	float best_scores[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint n_queries;
+	uint n_trains;
+} params;
+
+const uint kDescriptorDim = 128u;
+const uint kQueryTile = 16u;
+const uint kTrainTile = 32u;
+const uint kKTile = 8u;
+
+shared float query_tile[kQueryTile][kKTile];
+shared float train_tile[kTrainTile][kKTile];
+
+void main()
+{
+	const uint query_index = workSize2DTo1D(gl_GlobalInvocationID);
+	const uint local_query = gl_LocalInvocationID.x;
+	const bool query_is_active = query_index < params.n_queries;
+
+	float best_score = -3.402823466e38f;
+	uint best_index = 0u;
+
+	for (uint train_base = 0u; train_base < params.n_trains; train_base += kTrainTile) {
+		float tile_scores[kTrainTile];
+		for (uint tile_train = 0u; tile_train < kTrainTile; ++tile_train) {
+			tile_scores[tile_train] = 0.0f;
+		}
+
+		for (uint k_base = 0u; k_base < kDescriptorDim; k_base += kKTile) {
+			for (uint kk = 0u; kk < kKTile; ++kk) {
+				query_tile[local_query][kk] =
+					query_is_active ? queries[query_index * kDescriptorDim + k_base + kk] : 0.0f;
+			}
+
+			for (uint linear_index = local_query; linear_index < kTrainTile * kKTile; linear_index += gl_WorkGroupSize.x) {
+				const uint tile_train = linear_index / kKTile;
+				const uint kk = linear_index % kKTile;
+				const uint global_train_index = train_base + tile_train;
+				train_tile[tile_train][kk] =
+					global_train_index < params.n_trains
+						? trains[global_train_index * kDescriptorDim + k_base + kk]
+						: 0.0f;
+			}
+			barrier();
+
+			if (query_is_active) {
+				for (uint tile_train = 0u; tile_train < kTrainTile; ++tile_train) {
+					float partial = tile_scores[tile_train];
+					for (uint kk = 0u; kk < kKTile; ++kk) {
+						partial = fma(query_tile[local_query][kk], train_tile[tile_train][kk], partial);
+					}
+					tile_scores[tile_train] = partial;
+				}
+			}
+			barrier();
+		}
+
+		if (query_is_active) {
+			const uint tile_size = min(kTrainTile, params.n_trains - train_base);
+			for (uint tile_train = 0u; tile_train < tile_size; ++tile_train) {
+				const float score = tile_scores[tile_train];
+				if (score > best_score) {
+					best_score = score;
+					best_index = train_base + tile_train;
+				}
+			}
+		}
+	}
+
+	if (query_is_active) {
+		best_indices[query_index] = best_index;
+		best_scores[query_index] = best_score;
+	}
+}
