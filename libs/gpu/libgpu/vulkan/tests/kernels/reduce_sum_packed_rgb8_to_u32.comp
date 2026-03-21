@@ -30,7 +30,7 @@ void main()
 {
 	const uint global_index = workSize2DTo1D(gl_GlobalInvocationID);
 	const uint local_index = gl_LocalInvocationIndex;
-	const uint group_index = workSize2DTo1D(gl_WorkGroupID);
+	const uint group_index = workGroup2DTo1D(gl_WorkGroupID);
 
 	uint sum = 0u;
 	const uint begin = global_index * params.values_per_thread;

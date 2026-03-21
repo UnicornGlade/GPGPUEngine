@@ -79,7 +79,7 @@ struct GpuDecodeBenchmarkStats {
 	std::vector<double> brightness_reduce_seconds;
 	std::vector<double> readback_seconds;
 	uint64_t cpu_total_sum = 0;
-	uint32_t gpu_total_sum = 0;
+	uint64_t gpu_total_sum = 0;
 	uint32_t pixel_count = 0;
 	double cpu_average_brightness = 0.0;
 	double gpu_average_brightness = 0.0;
@@ -212,29 +212,38 @@ gpu::gpu_mem_32u *launchReductionOnGpu(const gpu::gpu_mem<T> &input,
 									   uint32_t input_count,
 									   gpu::gpu_mem_32u &scratch_a,
 									   gpu::gpu_mem_32u &scratch_b,
-									   avk2::KernelSource &kernel)
+									   avk2::KernelSource &kernel,
+									   uint64_t input_upper_bound,
+									   uint32_t &reduced_count)
 {
 	rassert(input_count > 0, 2026032101384700012, input_count);
+	rassert(input_upper_bound > 0, 2026032216142700001, input_upper_bound);
 	uint32_t group_count = divCeilU32(input_count, VK_GROUP_SIZE * kValuesPerThread);
 	scratch_a.resizeN(std::max(1u, group_count));
 	ReducePushConstants params{input_count, kValuesPerThread};
 	kernel.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, size_t(group_count) * VK_GROUP_SIZE), input, scratch_a);
 
 	uint32_t current_count = group_count;
+	uint64_t current_upper_bound = input_upper_bound * VK_GROUP_SIZE * kValuesPerThread;
 	gpu::gpu_mem_32u *current = &scratch_a;
 	gpu::gpu_mem_32u *next = &scratch_b;
 	avk2::KernelSource kernel_u32(avk2::getReduceSumU32ToU32Kernel());
 	while (current_count > 1) {
+		if (current_upper_bound > std::numeric_limits<uint32_t>::max() / (VK_GROUP_SIZE * kValuesPerThread)) {
+			break;
+		}
 		group_count = divCeilU32(current_count, VK_GROUP_SIZE * kValuesPerThread);
 		next->resizeN(std::max(1u, group_count));
 		ReducePushConstants next_params{current_count, kValuesPerThread};
 		kernel_u32.exec(next_params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, size_t(group_count) * VK_GROUP_SIZE), *current, *next);
 		current_count = group_count;
+		current_upper_bound *= VK_GROUP_SIZE * kValuesPerThread;
 		std::swap(current, next);
 	}
 
 	gpu::Context context;
 	context.vk()->waitForAllInflightComputeLaunches();
+	reduced_count = current_count;
 	return current;
 }
 
@@ -584,20 +593,28 @@ GpuDecodeBenchmarkStats runGpuDecodeBenchmark(const GpuPreparedImage &prepared)
 
 		timer reduce_timer;
 		gpu::gpu_mem_32u *sum_gpu = nullptr;
+		uint32_t reduced_count = 0;
 		{
 			profiling::ScopedRange scope("jpeg gpu brightness reduce", 0xFF8E44AD);
-			sum_gpu = launchReductionOnGpu(decoded_pixels_gpu, stats.pixel_count, partial_sums_a, partial_sums_b, reduce_kernel);
+			sum_gpu = launchReductionOnGpu(decoded_pixels_gpu,
+										 stats.pixel_count,
+										 partial_sums_a,
+										 partial_sums_b,
+										 reduce_kernel,
+										 255u,
+										 reduced_count);
 		}
 		stats.brightness_reduce_seconds.push_back(reduce_timer.elapsed());
 
 		timer readback_timer;
-		uint32_t gpu_sum = std::numeric_limits<uint32_t>::max();
+		std::vector<uint32_t> gpu_sums;
 		{
 			profiling::ScopedRange scope("jpeg gpu brightness readback", 0xFFF39C12);
-			sum_gpu->readN(&gpu_sum, 1);
+			gpu_sums = sum_gpu->readVector(reduced_count);
 		}
 		stats.readback_seconds.push_back(readback_timer.elapsed());
 
+		const uint64_t gpu_sum = std::accumulate(gpu_sums.begin(), gpu_sums.end(), uint64_t(0));
 		stats.gpu_total_sum = gpu_sum;
 		stats.gpu_average_brightness = static_cast<double>(gpu_sum) / stats.pixel_count;
 	}
