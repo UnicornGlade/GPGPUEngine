@@ -71,6 +71,45 @@ namespace {
 		return static_cast<double>(ticks) * static_cast<double>(timestamp_period_nanos) * 1e-9;
 	}
 
+	bool isLavapipeDeviceName(const std::string &device_name)
+	{
+		const std::string normalized = tolower(device_name);
+		return normalized.find("llvmpipe") != std::string::npos || normalized.find("lavapipe") != std::string::npos;
+	}
+
+	bool shouldSuppressValidationMessage(const avk2::InstanceContext &instance_context,
+										 const VkDebugUtilsMessengerCallbackDataEXT &callback_data)
+	{
+		if (avk2::isMoltenVK()) {
+			const std::string message_id_name = callback_data.pMessageIdName ? callback_data.pMessageIdName : "";
+			const std::string message = callback_data.pMessage ? callback_data.pMessage : "";
+
+			const std::string message_id_name_about_geometry_shader_feature = "VUID-VkShaderModuleCreateInfo-pCode-08740";
+			const std::string message_about_geometry_shader_feature = "SPIR-V Capability Geometry was declared, but one of the following requirements is required (VkPhysicalDeviceFeatures::geometryShader)";
+
+			if (message_id_name == message_id_name_about_geometry_shader_feature && message.find(message_about_geometry_shader_feature) != std::string::npos) {
+				// note that for now we need geometry shader ONLY for gl_PrimitiveID
+				// but there is no geometry shader support on MoltenVK,
+				// so we rely on fact that it seems that gl_PrimitiveID can be used on MoltenVK even without geometry shader feature requested
+				// https://computergraphics.stackexchange.com/questions/9449/vulkan-using-gl-primitiveid-without-geometryshader-feature#comment14810_9449
+				return true;
+			}
+		}
+
+		const std::string device_name = instance_context.activeDeviceName();
+		if (!isLavapipeDeviceName(device_name)) {
+			return false;
+		}
+
+		const std::string message_id_name = callback_data.pMessageIdName ? callback_data.pMessageIdName : "";
+		if (message_id_name != "VUID-VkWriteDescriptorSet-descriptorType-00333") {
+			return false;
+		}
+
+		const std::string message = callback_data.pMessage ? callback_data.pMessage : "";
+		return message.find("maxStorageBufferRange") != std::string::npos;
+	}
+
 	// see https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Validation_layers
 	// this is a debug callback for Vulkan Validation Layers
 	// when they find any problems - this callback will be triggered
@@ -80,22 +119,7 @@ namespace {
 	{
 		avk2::InstanceContext *instance_context = (avk2::InstanceContext*) pUserData;
 
-		bool message_is_suppressed = false;
-		if (avk2::isMoltenVK()) {
-			std::string message_id_name = std::string(pCallbackData->pMessageIdName);
-			std::string message = std::string(pCallbackData->pMessage);
-
-			std::string message_id_name_about_geometry_shader_feature = "VUID-VkShaderModuleCreateInfo-pCode-08740";
-			std::string message_about_geometry_shader_feature = "SPIR-V Capability Geometry was declared, but one of the following requirements is required (VkPhysicalDeviceFeatures::geometryShader)";
-
-			if (message_id_name == message_id_name_about_geometry_shader_feature && message.find(message_about_geometry_shader_feature) != std::string::npos) {
-				message_is_suppressed = true;
-				// note that for now we need geometry shader ONLY for gl_PrimitiveID
-				// but there is no geometry shader support on MoltenVK,
-				// so we rely on fact that it seems that gl_PrimitiveID can be used on MoltenVK even without geometry shader feature requested
-				// https://computergraphics.stackexchange.com/questions/9449/vulkan-using-gl-primitiveid-without-geometryshader-feature#comment14810_9449
-			}
-		}
+		const bool message_is_suppressed = shouldSuppressValidationMessage(*instance_context, *pCallbackData);
 
 		if (!message_is_suppressed) {
 			std::cerr << "Vulkan debug callback triggered with " << pCallbackData->pMessage << std::endl;
@@ -417,6 +441,7 @@ public:
 		instance_context_ = avk2::InstanceContext::getGlobalInstanceContext(enable_validation_layers);
 
 		device_info_.init(instance_context_->instance());
+		instance_context_->setActiveDeviceName(device_info_.name);
 
 		std::vector<vk::raii::PhysicalDevice> all_vk_devices = instance_context_->instance().enumeratePhysicalDevices();
 		rassert(vk_device_id < all_vk_devices.size(), 305965578003001);

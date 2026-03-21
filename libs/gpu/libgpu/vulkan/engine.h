@@ -134,6 +134,8 @@ namespace avk2 {
 
 		bool													isDebugCallbackTriggered()					{	return is_debug_callback_triggered_;		}
 		void													setDebugCallbackTriggered(bool triggered)	{	is_debug_callback_triggered_ = triggered;	}
+		void													setActiveDeviceName(const std::string &name)	{	active_device_name_ = name;				}
+		const std::string										&activeDeviceName() const					{	return active_device_name_;				}
 
 		// vkContext and vkInstance should be re-used - so they are lazily inited in this Singleton, otherwise #45 call to avk2::createInstance is followed with empty instance.enumeratePhysicalDevices() on some systems
 		static std::shared_ptr<InstanceContext>					getGlobalInstanceContext(bool enable_validation_layers=false);
@@ -157,6 +159,7 @@ namespace avk2 {
 		std::shared_ptr<vk::raii::Instance>			instance_;
 		std::shared_ptr<VkDebugUtilsMessengerEXT>	debug_messenger_;
 		bool										is_debug_callback_triggered_;
+		std::string									active_device_name_;
 	};
 
 	class VulkanEngine;

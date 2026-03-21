@@ -181,7 +181,8 @@ BenchmarkStats runSingleImageBenchmark(const fs::path &path)
 	gpu::gpu_mem_8u decoded_gpu;
 	gpu::gpu_mem_32u partial_sums_a;
 	gpu::gpu_mem_32u partial_sums_b;
-	decoded_gpu.resizeN(decoded_once.pixels.size());
+	const size_t padded_element_count = divCeilU32(result.element_count, 4u) * 4u;
+	decoded_gpu.resizeN(padded_element_count);
 
 	avk2::KernelSource kernel_u8(avk2::getReduceSumU8ToU32Kernel());
 
@@ -202,7 +203,9 @@ BenchmarkStats runSingleImageBenchmark(const fs::path &path)
 		timer upload_timer;
 		{
 			profiling::ScopedRange scope("jpeg upload", 0xFF239B56);
-			decoded_gpu.writeN(decoded.pixels.data(), decoded.pixels.size());
+			std::vector<uint8_t> padded_pixels = decoded.pixels;
+			padded_pixels.resize(padded_element_count, uint8_t(0));
+			decoded_gpu.writeN(padded_pixels.data(), padded_pixels.size());
 		}
 		result.upload_seconds.push_back(upload_timer.elapsed());
 
