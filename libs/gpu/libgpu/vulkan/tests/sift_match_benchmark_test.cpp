@@ -32,6 +32,7 @@ constexpr uint32_t kBruteforceLocalGroupSize = 64u;
 constexpr uint32_t kFp16PackedGroupSize = 32u;
 constexpr uint32_t kGemmLikeGroupSize = 16u;
 constexpr uint32_t kGemmLikeVec4GroupSize = 32u;
+constexpr uint32_t kLlvmPipeDescriptorCountCap = 384u;
 
 struct MatchResult {
 	std::vector<uint32_t> best_indices;
@@ -581,6 +582,11 @@ TensorCoreMode detectTensorCoreMode(const gpu::Device &device)
 	return TensorCoreMode::None;
 }
 
+bool isLlvmPipeDevice(const gpu::Device &device)
+{
+	return device.name.find("llvmpipe") != std::string::npos;
+}
+
 void logCpuBenchmark(const CpuBenchmarkResult &result,
 					 uint32_t n_queries,
 					 uint32_t n_trains,
@@ -673,32 +679,6 @@ TEST(vulkan, siftMatchBenchmark)
 	const uint32_t benchmark_iterations = getenvU32("GPGPU_VULKAN_SIFT_MATCH_ITERS", kDefaultBenchmarkIterations);
 	const uint32_t cpu_thread_count = selectCpuThreadCount();
 
-	std::vector<float> queries = makeRandomRootSiftDescriptors(descriptor_count, 239u);
-	std::vector<float> trains = makeRandomRootSiftDescriptors(descriptor_count, 997u);
-	const std::vector<uint32_t> queries_fp16_packed = packDescriptorsToFp16(queries);
-	const std::vector<uint32_t> trains_fp16_packed = packDescriptorsToFp16(trains);
-	const std::vector<uint16_t> queries_fp16_scalar = packDescriptorsToFp16Scalar(queries);
-	const std::vector<uint16_t> trains_fp16_scalar = packDescriptorsToFp16Scalar(trains);
-	const std::vector<float> queries_fp16 = unpackDescriptorsFromFp16(queries_fp16_packed);
-	const std::vector<float> trains_fp16 = unpackDescriptorsFromFp16(trains_fp16_packed);
-
-	CpuBenchmarkResult cpu_reference;
-	{
-		profiling::ScopedRange scope("sift match cpu reference", 0xFF5B8C5A);
-		cpu_reference = bruteForceCpuReference(queries, trains, descriptor_count, descriptor_count, cpu_thread_count);
-	}
-	logCpuBenchmark(cpu_reference, descriptor_count, descriptor_count, cpu_thread_count);
-
-	CpuBenchmarkResult cpu_reference_fp16;
-	{
-		profiling::ScopedRange scope("sift match cpu fp16 reference", 0xFF6C5CE7);
-		cpu_reference_fp16 = bruteForceCpuReference(queries_fp16, trains_fp16, descriptor_count, descriptor_count, cpu_thread_count);
-	}
-	logCpuBenchmark(cpu_reference_fp16, descriptor_count, descriptor_count, cpu_thread_count);
-	std::cout << "CPU fp16 quantized reference drift:" << std::endl;
-	logTop1DifferencesVsFp32("cpu fp16 vs fp32", cpu_reference.matches, cpu_reference_fp16.matches);
-	logTop2PairDifferencesVsFp32(cpu_reference.matches, cpu_reference_fp16.matches);
-
 	size_t tested_devices = 0;
 	for (size_t device_index = 0; device_index < devices.size(); ++device_index) {
 		if (!devices[device_index].isGPU()) {
@@ -708,6 +688,41 @@ TEST(vulkan, siftMatchBenchmark)
 
 		++tested_devices;
 		std::cout << "Testing Vulkan device #" << tested_devices << ": " << devices[device_index].name << std::endl;
+
+		const uint32_t effective_descriptor_count =
+			isLlvmPipeDevice(devices[device_index]) ? std::min(descriptor_count, kLlvmPipeDescriptorCountCap) : descriptor_count;
+		if (effective_descriptor_count != descriptor_count) {
+			std::cout << "Reducing SIFT benchmark descriptor count from " << descriptor_count
+					  << " to " << effective_descriptor_count
+					  << " for llvmpipe correctness smoke-test" << std::endl;
+		}
+
+		std::vector<float> queries = makeRandomRootSiftDescriptors(effective_descriptor_count, 239u);
+		std::vector<float> trains = makeRandomRootSiftDescriptors(effective_descriptor_count, 997u);
+		const std::vector<uint32_t> queries_fp16_packed = packDescriptorsToFp16(queries);
+		const std::vector<uint32_t> trains_fp16_packed = packDescriptorsToFp16(trains);
+		const std::vector<uint16_t> queries_fp16_scalar = packDescriptorsToFp16Scalar(queries);
+		const std::vector<uint16_t> trains_fp16_scalar = packDescriptorsToFp16Scalar(trains);
+		const std::vector<float> queries_fp16 = unpackDescriptorsFromFp16(queries_fp16_packed);
+		const std::vector<float> trains_fp16 = unpackDescriptorsFromFp16(trains_fp16_packed);
+
+		CpuBenchmarkResult cpu_reference;
+		{
+			profiling::ScopedRange scope("sift match cpu reference", 0xFF5B8C5A);
+			cpu_reference = bruteForceCpuReference(queries, trains, effective_descriptor_count, effective_descriptor_count, cpu_thread_count);
+		}
+		logCpuBenchmark(cpu_reference, effective_descriptor_count, effective_descriptor_count, cpu_thread_count);
+
+		CpuBenchmarkResult cpu_reference_fp16;
+		{
+			profiling::ScopedRange scope("sift match cpu fp16 reference", 0xFF6C5CE7);
+			cpu_reference_fp16 = bruteForceCpuReference(queries_fp16, trains_fp16, effective_descriptor_count, effective_descriptor_count, cpu_thread_count);
+		}
+		logCpuBenchmark(cpu_reference_fp16, effective_descriptor_count, effective_descriptor_count, cpu_thread_count);
+		std::cout << "CPU fp16 quantized reference drift:" << std::endl;
+		logTop1DifferencesVsFp32("cpu fp16 vs fp32", cpu_reference.matches, cpu_reference_fp16.matches);
+		logTop2PairDifferencesVsFp32(cpu_reference.matches, cpu_reference_fp16.matches);
+
 		gpu::Context context = activateVKContext(devices[device_index]);
 		context.setMemoryGuardsChecksAfterKernels(false);
 
@@ -726,19 +741,19 @@ TEST(vulkan, siftMatchBenchmark)
 																	 kBruteforceLocalGroupSize,
 																	 queries,
 																	 trains,
-																	 descriptor_count,
-																	 descriptor_count,
+																	 effective_descriptor_count,
+																	 effective_descriptor_count,
 																	 benchmark_iterations);
 		expectCloseToCpuReference("vk brute-force local matcher",
 								  cpu_reference.matches,
 								  brute_force_result.matches,
 								  queries,
 								  trains,
-								  descriptor_count);
+								  effective_descriptor_count);
 		logGpuBenchmark("Vulkan brute-force local SIFT matcher",
 						brute_force_result,
-						descriptor_count,
-						descriptor_count,
+						effective_descriptor_count,
+						effective_descriptor_count,
 						has_fp32_coop_matrices);
 
 		const GpuBenchmarkResult fp16_packed_result = runGpuMatcherFp16Packed(fp16_packed_kernel,
@@ -746,25 +761,25 @@ TEST(vulkan, siftMatchBenchmark)
 																	 kFp16PackedGroupSize,
 																	 queries_fp16_packed,
 																	 trains_fp16_packed,
-																	 descriptor_count,
-																	 descriptor_count,
+																	 effective_descriptor_count,
+																	 effective_descriptor_count,
 																	 benchmark_iterations);
 		expectCloseToCpuReference("vk gemm-like fp16 packed matcher",
 								  cpu_reference_fp16.matches,
 								  fp16_packed_result.matches,
 								  queries_fp16,
 								  trains_fp16,
-								  descriptor_count);
+								  effective_descriptor_count);
 		logGpuBenchmark("Vulkan GEMM-like fp16 packed SIFT matcher",
 						fp16_packed_result,
-						descriptor_count,
-						descriptor_count,
+						effective_descriptor_count,
+						effective_descriptor_count,
 						has_fp32_coop_matrices);
 		logTop1DifferencesVsFp32("gpu fp16 vs fp32", cpu_reference.matches, fp16_packed_result.matches);
 		logTop2PairDifferencesVsFp32(cpu_reference.matches, fp16_packed_result.matches);
 
 			if (tensor_core_mode != TensorCoreMode::None) {
-				const uint32_t tensor_work_items = ((descriptor_count + 15u) / 16u) * 32u;
+				const uint32_t tensor_work_items = ((effective_descriptor_count + 15u) / 16u) * 32u;
 				avk2::KernelSource &selected_tensor_kernel = tensor_core_mode == TensorCoreMode::Khr
 					? tensor_core_kernel
 					: tensor_core_kernel_nv;
@@ -772,24 +787,24 @@ TEST(vulkan, siftMatchBenchmark)
 					? "Vulkan tensor-core RootSIFT matcher (KHR)"
 					: "Vulkan tensor-core RootSIFT matcher (NV)";
 				const GpuBenchmarkResult tensor_core_result = runGpuMatcherFp16Scalar(selected_tensor_kernel,
-																			 context,
-																			 32u,
-																			 tensor_work_items,
+																		 context,
+																		 32u,
+																		 tensor_work_items,
 																		 queries_fp16_scalar,
 																		 trains_fp16_scalar,
-																		 descriptor_count,
-																		 descriptor_count,
+																		 effective_descriptor_count,
+																		 effective_descriptor_count,
 																		 benchmark_iterations);
 			expectCloseToCpuReference("vk tensor core matcher",
 									  cpu_reference_fp16.matches,
 									  tensor_core_result.matches,
 										  queries_fp16,
 										  trains_fp16,
-										  descriptor_count);
+										  effective_descriptor_count);
 				logGpuBenchmark(tensor_label,
 								tensor_core_result,
-								descriptor_count,
-								descriptor_count,
+								effective_descriptor_count,
+								effective_descriptor_count,
 								has_fp32_coop_matrices);
 				logTop1DifferencesVsFp32("gpu tensor core vs fp32", cpu_reference.matches, tensor_core_result.matches);
 				logTop2PairDifferencesVsFp32(cpu_reference.matches, tensor_core_result.matches);
@@ -801,19 +816,19 @@ TEST(vulkan, siftMatchBenchmark)
 																									  tensor_work_items,
 																									  queries_fp16_scalar,
 																									  trains_fp16_scalar,
-																									  descriptor_count,
-																									  descriptor_count,
+																									  effective_descriptor_count,
+																									  effective_descriptor_count,
 																									  benchmark_iterations);
 					expectCloseToCpuReference("vk tensor core preloaded-a matcher",
 											  cpu_reference_fp16.matches,
 											  tensor_core_preloaded_a_result.matches,
 											  queries_fp16,
 											  trains_fp16,
-											  descriptor_count);
+											  effective_descriptor_count);
 					logGpuBenchmark("Vulkan tensor-core preloaded-A RootSIFT matcher (NV)",
 									tensor_core_preloaded_a_result,
-									descriptor_count,
-									descriptor_count,
+									effective_descriptor_count,
+									effective_descriptor_count,
 									has_fp32_coop_matrices);
 					logTop1DifferencesVsFp32("gpu tensor core preloaded-a vs fp32", cpu_reference.matches, tensor_core_preloaded_a_result.matches);
 					logTop2PairDifferencesVsFp32(cpu_reference.matches, tensor_core_preloaded_a_result.matches);
@@ -827,19 +842,19 @@ TEST(vulkan, siftMatchBenchmark)
 																 kGemmLikeGroupSize,
 																 queries,
 																 trains,
-																 descriptor_count,
-																 descriptor_count,
+																 effective_descriptor_count,
+																 effective_descriptor_count,
 																 benchmark_iterations);
 		expectCloseToCpuReference("vk gemm-like matcher",
 								  cpu_reference.matches,
 								  gemm_like_result.matches,
 								  queries,
 								  trains,
-								  descriptor_count);
+								  effective_descriptor_count);
 		logGpuBenchmark("Vulkan GEMM-like SIFT matcher",
 						gemm_like_result,
-						descriptor_count,
-						descriptor_count,
+						effective_descriptor_count,
+						effective_descriptor_count,
 						has_fp32_coop_matrices);
 
 		const GpuBenchmarkResult gemm_like_vec4_result = runGpuMatcher(gemm_like_vec4_kernel,
@@ -847,19 +862,19 @@ TEST(vulkan, siftMatchBenchmark)
 																	 kGemmLikeVec4GroupSize,
 																	 queries,
 																	 trains,
-																	 descriptor_count,
-																	 descriptor_count,
+																	 effective_descriptor_count,
+																	 effective_descriptor_count,
 																	 benchmark_iterations);
 		expectCloseToCpuReference("vk gemm-like vec4 matcher",
 								  cpu_reference.matches,
 								  gemm_like_vec4_result.matches,
 								  queries,
 								  trains,
-								  descriptor_count);
+								  effective_descriptor_count);
 		logGpuBenchmark("Vulkan GEMM-like vec4 SIFT matcher",
 						gemm_like_vec4_result,
-						descriptor_count,
-						descriptor_count,
+						effective_descriptor_count,
+						effective_descriptor_count,
 						has_fp32_coop_matrices);
 
 		checkPostInvariants();
