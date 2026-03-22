@@ -140,3 +140,50 @@ TEST(vulkan, asyncAplusbChain)
 
 	checkPostInvariants();
 }
+
+TEST(vulkan, asyncTimestampQueriesWrapWithoutCallerReset)
+{
+	if (!areTimestampQueriesEnabled()) {
+		GTEST_SKIP() << "Timestamp queries are disabled.";
+	}
+
+	std::vector<gpu::Device> devices = enumVKDevices();
+	const int nlaunches = (262144 / 2) + 257;
+
+	for (size_t k = 0; k < devices.size(); ++k) {
+		std::cout << "Testing Vulkan device #" << (k + 1) << "/" << devices.size() << "..." << std::endl;
+		gpu::Context context = activateVKContext(devices[k]);
+		context.setMemoryGuardsChecksAfterKernels(false);
+
+		avk2::KernelSource kernel_write_value(avk2::getWriteValueAtIndexKernel());
+		gpu::gpu_mem_32u buffer0(nlaunches / 2 + 1);
+		gpu::gpu_mem_32u buffer1(nlaunches / 2 + 1);
+		buffer0.fill(0);
+		buffer1.fill(0);
+
+		context.vk()->setMaxInflightComputeLaunches(32);
+		context.vk()->resetAsyncComputeStats();
+
+		for (int launch = 0; launch < nlaunches; ++launch) {
+			WriteValueAtIndexParams params{static_cast<unsigned int>(launch & 1), launch / 2, static_cast<unsigned int>(launch + 23)};
+			kernel_write_value.exec(params, gpu::WorkSize1DTo2D(VK_GROUP_SIZE, 1), buffer0, buffer1);
+		}
+
+		avk2::AsyncComputeStats stats = context.vk()->getAsyncComputeStats(true);
+		EXPECT_GT(stats.total_seconds, 0.0);
+		EXPECT_EQ(stats.launches_count, static_cast<size_t>(nlaunches));
+
+		std::vector<unsigned int> got0 = buffer0.readVector();
+		std::vector<unsigned int> got1 = buffer1.readVector();
+		for (int i = 0; i < nlaunches / 2; ++i) {
+			EXPECT_EQ(got0[i], static_cast<unsigned int>(2 * i + 23));
+			EXPECT_EQ(got1[i], static_cast<unsigned int>(2 * i + 24));
+		}
+		if ((nlaunches & 1) != 0) {
+			EXPECT_EQ(got0[nlaunches / 2], static_cast<unsigned int>(nlaunches - 1 + 23));
+			EXPECT_EQ(got1[nlaunches / 2], 0u);
+		}
+	}
+
+	checkPostInvariants();
+}

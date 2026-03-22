@@ -27,6 +27,8 @@
 #endif
 
 namespace {
+	constexpr uint32_t kAsyncTimestampQueryPoolCapacity = 262144;
+
 	void checkVulkanRassertWords(const unsigned int *data_code_and_line)
 	{
 		rassert(data_code_and_line[0] == VK_RASSERT_CODE_MAGIC_GUARDS, 873958803);
@@ -860,7 +862,14 @@ uint32_t avk2::VulkanEngine::allocateTimestampQueries(uint32_t count)
 {
 	rassert(async_compute_timestamps_enabled_, 2026031516312500002);
 	rassert(async_compute_query_pool_, 2026031517255500002);
-	rassert(next_async_compute_query_ + count <= 262144, 2026031517255500003, next_async_compute_query_, count);
+	rassert(count <= kAsyncTimestampQueryPoolCapacity, 2026031517255500003, count, kAsyncTimestampQueryPoolCapacity);
+	if (next_async_compute_query_ + count > kAsyncTimestampQueryPoolCapacity) {
+		// Query ids are only reused safely after all inflight launches that reference the
+		// old ids have retired and their timestamps were collected.
+		waitForAllInflightComputeLaunches();
+		next_async_compute_query_ = 0;
+	}
+	rassert(next_async_compute_query_ + count <= kAsyncTimestampQueryPoolCapacity, 2026031517255500003, next_async_compute_query_, count);
 	uint32_t first_query = next_async_compute_query_;
 	next_async_compute_query_ += count;
 	return first_query;
@@ -870,7 +879,12 @@ uint32_t avk2::VulkanEngine::allocateRenderTimestampQueries(uint32_t count)
 {
 	rassert(async_render_timestamps_enabled_, 2026031517415800002);
 	rassert(async_render_query_pool_, 2026031517415800003);
-	rassert(next_async_render_query_ + count <= 262144, 2026031517415800004, next_async_render_query_, count);
+	rassert(count <= kAsyncTimestampQueryPoolCapacity, 2026031517415800004, count, kAsyncTimestampQueryPoolCapacity);
+	if (next_async_render_query_ + count > kAsyncTimestampQueryPoolCapacity) {
+		waitForAllInflightRenderLaunches();
+		next_async_render_query_ = 0;
+	}
+	rassert(next_async_render_query_ + count <= kAsyncTimestampQueryPoolCapacity, 2026031517415800004, next_async_render_query_, count);
 	uint32_t first_query = next_async_render_query_;
 	next_async_render_query_ += count;
 	return first_query;
@@ -1508,7 +1522,7 @@ void avk2::VulkanEngine::init(uint64_t vk_device_id, bool enable_validation_laye
 	async_render_timestamps_enabled_ = async_compute_timestamps_enabled_;
 	async_render_enabled_ = isEnvEnabled("GPGPU_ENABLE_VULKAN_ASYNC_RENDER", true);
 	if (async_compute_timestamps_enabled_) {
-		vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, 262144);
+		vk::QueryPoolCreateInfo query_pool_create_info({}, vk::QueryType::eTimestamp, kAsyncTimestampQueryPoolCapacity);
 		async_compute_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
 		async_render_query_pool_ = std::make_shared<vk::raii::QueryPool>(getDevice(), query_pool_create_info);
 	} else {
