@@ -404,6 +404,7 @@ namespace avk2 {
 		void							init(uint64_t vk_device_id, bool enable_validation_layers);
 
 		avk2::raii::BufferData*			createBuffer(size_t size);
+		void							fillBuffer(const avk2::raii::BufferData &buffer_dst, size_t offset, size_t size, uint32_t value);
 		void							writeBuffer(const avk2::raii::BufferData &buffer_dst, size_t offset, size_t size, const void *src);
 		void							readBuffer(const avk2::raii::BufferData &buffer_src, size_t offset, size_t size, void *dst);
 

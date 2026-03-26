@@ -477,6 +477,30 @@ const unsigned int* shared_device_buffer::getMagicGuardBytesHostPtr()
 	return guard_magic_bytes.data();
 }
 
+bool shared_device_buffer::tryFillPattern32(uint32_t value)
+{
+	if (size_ == 0) {
+		return true;
+	}
+
+	if (size_ % sizeof(uint32_t) != 0 || offset_ % sizeof(uint32_t) != 0) {
+		return false;
+	}
+
+	Context context;
+	if (context.type() != type_) {
+		return false;
+	}
+
+	switch (type_) {
+	case Context::TypeVulkan:
+		context.vk()->fillBuffer(*((avk2::raii::BufferData*) data_), offset_, size_, value);
+		return true;
+	default:
+		return false;
+	}
+}
+
 void shared_device_buffer::writeMagicGuards()
 {
 	rassert(offset_ == nbytes_guard_prefix_, 401744672);

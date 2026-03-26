@@ -3,6 +3,9 @@
 #include <string>
 #include <vector>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 #include "shared_host_buffer.h"
 
@@ -54,6 +57,7 @@ public:
 	void 			read2D(size_t spitch, void *dst, size_t dpitch, size_t width, size_t height) const;
 
 	void 			copyTo(shared_device_buffer &that, size_t size) const;
+	bool			tryFillPattern32(uint32_t value);
 
 	bool			checkMagicGuards(const std::string &info) const;
 
@@ -126,7 +130,14 @@ public:
 
 	void			fill(T value)
 	{
-		// TODO speedup this method with writing on GPU side (f.e. from kernel)
+		if constexpr (sizeof(T) == sizeof(uint32_t) && std::is_trivially_copyable_v<T>) {
+			uint32_t pattern = 0;
+			std::memcpy(&pattern, &value, sizeof(uint32_t));
+			if (this->tryFillPattern32(pattern)) {
+				return;
+			}
+		}
+
 		std::vector<T> values(number(), value);
 		this->writeN(values.data(), values.size());
 	}

@@ -1922,6 +1922,22 @@ void avk2::VulkanEngine::writeBuffer(const avk2::raii::BufferData &buffer_dst, s
 	}
 }
 
+void avk2::VulkanEngine::fillBuffer(const avk2::raii::BufferData &buffer_dst, size_t offset, size_t size, uint32_t value)
+{
+	profiling::ScopedRange scope("vk fillBuffer", 0xFF2471A3);
+	rassert(offset % sizeof(uint32_t) == 0, 202603271718000001ULL);
+	rassert(size % sizeof(uint32_t) == 0, 202603271718000002ULL);
+
+	vk::raii::CommandBuffer command_buffer = createCommandBuffer();
+	command_buffer.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+	command_buffer.fillBuffer(buffer_dst.getBuffer(), offset, size, value);
+	command_buffer.end();
+
+	vk::raii::Fence& fence = findFence("fillBuffer");
+	submitCommandBufferAsync(command_buffer, fence);
+	VK_CHECK_RESULT(getDevice().waitForFences(vk::Fence(fence), true, VULKAN_TIMEOUT_NANOSECS), 202603271718000003ULL);
+}
+
 void avk2::VulkanEngine::readBuffer(const avk2::raii::BufferData &buffer_src, size_t offset, size_t size, void *dst)
 {
 	profiling::ScopedRange scope("vk readBuffer", 0xFF1F618D);
