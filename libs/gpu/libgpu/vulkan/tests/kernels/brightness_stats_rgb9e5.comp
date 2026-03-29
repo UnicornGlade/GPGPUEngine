@@ -1,0 +1,72 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D packedImage;
+
+layout(std430, binding = 1) buffer PartialSum {
+	float partialSum[];
+};
+
+layout(std430, binding = 2) buffer PartialSumSq {
+	float partialSumSq[];
+};
+
+layout(std430, binding = 3) buffer PartialCount {
+	uint partialCount[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint groupsX;
+} params;
+
+shared float sharedSum[256];
+shared float sharedSumSq[256];
+shared uint sharedCount[256];
+
+float brightness(vec3 color)
+{
+	return dot(color, vec3(0.2126f, 0.7152f, 0.0722f));
+}
+
+void main()
+{
+	const uvec2 gid = gl_GlobalInvocationID.xy;
+	const uint local_index = gl_LocalInvocationIndex;
+	float local_sum = 0.0f;
+	float local_sum_sq = 0.0f;
+	uint local_count = 0u;
+
+	if (gid.x < params.width && gid.y < params.height) {
+		const vec3 color = texelFetch(packedImage, ivec2(gid), 0).rgb;
+		const float value = brightness(color);
+		local_sum = value;
+		local_sum_sq = value * value;
+		local_count = 1u;
+	}
+
+	sharedSum[local_index] = local_sum;
+	sharedSumSq[local_index] = local_sum_sq;
+	sharedCount[local_index] = local_count;
+	barrier();
+
+	for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+		if (local_index < stride) {
+			sharedSum[local_index] += sharedSum[local_index + stride];
+			sharedSumSq[local_index] += sharedSumSq[local_index + stride];
+			sharedCount[local_index] += sharedCount[local_index + stride];
+		}
+		barrier();
+	}
+
+	if (local_index == 0u) {
+		const uint group_index = gl_WorkGroupID.y * params.groupsX + gl_WorkGroupID.x;
+		partialSum[group_index] = sharedSum[0];
+		partialSumSq[group_index] = sharedSumSq[0];
+		partialCount[group_index] = sharedCount[0];
+	}
+}

@@ -1,0 +1,76 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2DArray originalImage;
+layout(binding = 1) uniform sampler2D packedImage;
+
+layout(std430, binding = 2) buffer PartialSse {
+	float partialSse[];
+};
+
+layout(std430, binding = 3) buffer PartialCount {
+	uint partialCount[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint groupsX;
+} params;
+
+shared float sharedSse[256];
+shared uint sharedCount[256];
+
+float brightness(vec3 color)
+{
+	return dot(color, vec3(0.2126f, 0.7152f, 0.0722f));
+}
+
+bool isEmptyPixel(vec3 value)
+{
+	return value.r >= 3.0e38f || value.g >= 3.0e38f || value.b >= 3.0e38f;
+}
+
+void main()
+{
+	const uvec2 gid = gl_GlobalInvocationID.xy;
+	const uint local_index = gl_LocalInvocationIndex;
+	float local_sse = 0.0f;
+	uint local_count = 0u;
+
+	if (gid.x < params.width && gid.y < params.height) {
+		const ivec3 base_coord = ivec3(gid, 0);
+		vec3 original_color;
+		original_color.r = texelFetch(originalImage, base_coord + ivec3(0, 0, 0), 0).r;
+		original_color.g = texelFetch(originalImage, base_coord + ivec3(0, 0, 1), 0).r;
+		original_color.b = texelFetch(originalImage, base_coord + ivec3(0, 0, 2), 0).r;
+
+		if (!isEmptyPixel(original_color)) {
+			const vec3 packed_color = texelFetch(packedImage, ivec2(gid), 0).rgb;
+			const float delta = brightness(original_color) - brightness(packed_color);
+			local_sse = delta * delta;
+			local_count = 1u;
+		}
+	}
+
+	sharedSse[local_index] = local_sse;
+	sharedCount[local_index] = local_count;
+	barrier();
+
+	for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+		if (local_index < stride) {
+			sharedSse[local_index] += sharedSse[local_index + stride];
+			sharedCount[local_index] += sharedCount[local_index + stride];
+		}
+		barrier();
+	}
+
+	if (local_index == 0u) {
+		const uint group_index = gl_WorkGroupID.y * params.groupsX + gl_WorkGroupID.x;
+		partialSse[group_index] = sharedSse[0];
+		partialCount[group_index] = sharedCount[0];
+	}
+}

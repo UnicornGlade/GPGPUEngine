@@ -71,6 +71,7 @@ set(CUDA_SOURCES
         )
 
 set (SOURCES_TEST
+        ../../src/io/scene_reader.cpp
         libgpu/opencl/tests/kernels/kernels.cpp
         libgpu/opencl/tests/aplusb_test.cpp
         libgpu/opencl/tests/radix_sort_test.cpp
@@ -86,6 +87,7 @@ set (SOURCES_TEST
         libgpu/vulkan/tests/jpeg_decode_gpu_color_test.cpp
         libgpu/vulkan/tests/image_conversion_from_float_to_T_test.cpp
         libgpu/vulkan/tests/interpolation_test.cpp
+        libgpu/vulkan/tests/hdr_packed_image_benchmark_test.cpp
         libgpu/vulkan/tests/pipeline_cache_test.cpp
         libgpu/vulkan/tests/main.cpp
         libgpu/vulkan/tests/radix_sort_test.cpp
@@ -239,6 +241,10 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/aplusb.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/atomic_add.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/batched_binary_search.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/fill_buffer_with_zeros.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/brightness_stats_float.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/brightness_stats_rgb9e5.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/compare_hdr_rgb9e5.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/encode_bc6h_constant.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420_coeffs_to_ycbcr.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/jpeg_decode_color_420_coeffs_to_ycbcr_int.comp VULKAN_DEFINES)
@@ -252,8 +258,10 @@ compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_packed_rgb8_to_u32
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_u8_to_u32.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/reduce_sum_u32_to_u32.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/ycbcr420_to_rgb.comp VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/pack_hdr_rgb9e5.comp VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.vert VULKAN_DEFINES)
 compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize.frag VULKAN_DEFINES)
+compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize_hdr_gnome.frag VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/rasterize_blending.frag VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_01_local_counting.comp VULKAN_DEFINES)
 	compile_vulkan(HEADERS libgpu/vulkan/tests/kernels/radix_sort_01_local_counting_portable.comp VULKAN_DEFINES)

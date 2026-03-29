@@ -1,0 +1,42 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2DArray originalImage;
+
+layout(std430, binding = 1) buffer PackedOutput {
+	uvec2 packedValues[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+} params;
+
+bool isEmptyPixel(vec3 value)
+{
+	return value.r >= 3.0e38f || value.g >= 3.0e38f || value.b >= 3.0e38f;
+}
+
+void main()
+{
+	const uvec2 gid = gl_GlobalInvocationID.xy;
+	if (gid.x >= params.width || gid.y >= params.height) {
+		return;
+	}
+
+	const ivec3 base_coord = ivec3(gid, 0);
+	vec3 color;
+	color.r = texelFetch(originalImage, base_coord + ivec3(0, 0, 0), 0).r;
+	color.g = texelFetch(originalImage, base_coord + ivec3(0, 0, 1), 0).r;
+	color.b = texelFetch(originalImage, base_coord + ivec3(0, 0, 2), 0).r;
+
+	const uint index = gid.y * params.width + gid.x;
+	if (isEmptyPixel(color)) {
+		packedValues[index] = uvec2(0u, 0u);
+	} else {
+		packedValues[index] = uvec2(packHalf2x16(color.rg), packHalf2x16(vec2(color.b, 0.0f)));
+	}
+}

@@ -1,0 +1,164 @@
+#version 450
+
+#include <libgpu/vulkan/vk/common.vk>
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2DArray originalImage;
+
+layout(std430, binding = 1) buffer EncodedBlocks {
+	uvec4 blocks[];
+};
+
+layout(push_constant) uniform PushConstants {
+	uint width;
+	uint height;
+	uint blocksX;
+} params;
+
+bool isEmptyPixel(vec3 value)
+{
+	return value.r >= 3.0e38f || value.g >= 3.0e38f || value.b >= 3.0e38f;
+}
+
+uint halfBitsFromFloat(float value)
+{
+	return packHalf2x16(vec2(clamp(value, 0.0f, 65504.0f), 0.0f)) & 0xFFFFu;
+}
+
+uint quantizeEndpoint10(float value)
+{
+	const uint half_bits = halfBitsFromFloat(value);
+	if (half_bits == 0u) {
+		return 0u;
+	}
+	if (half_bits >= 0x7BFFu) {
+		return 1023u;
+	}
+	return min(1022u, (half_bits + 15u) / 31u);
+}
+
+const uint kWeights4[16] = uint[16](
+	0u, 4u, 9u, 13u, 17u, 21u, 26u, 30u,
+	34u, 38u, 43u, 47u, 51u, 55u, 60u, 64u
+);
+
+void setBits(inout uvec4 words, uint bit_offset, uint bit_count, uint value)
+{
+	for (uint i = 0u; i < bit_count; ++i) {
+		const uint dst_bit = bit_offset + i;
+		const uint word_index = dst_bit >> 5u;
+		const uint bit_in_word = dst_bit & 31u;
+		const uint bit_value = (value >> i) & 1u;
+		words[word_index] = (words[word_index] & ~(1u << bit_in_word)) | (bit_value << bit_in_word);
+	}
+}
+
+void main()
+{
+	const uvec2 block_id = gl_GlobalInvocationID.xy;
+	const uint blocks_y = (params.height + 3u) / 4u;
+	if (block_id.x >= params.blocksX || block_id.y >= blocks_y) {
+		return;
+	}
+
+	vec3 sum = vec3(0.0f);
+	uint count = 0u;
+	for (uint dy = 0u; dy < 4u; ++dy) {
+		for (uint dx = 0u; dx < 4u; ++dx) {
+			const uvec2 pixel = block_id * 4u + uvec2(dx, dy);
+			if (pixel.x >= params.width || pixel.y >= params.height) {
+				continue;
+			}
+
+			const ivec3 base_coord = ivec3(pixel, 0);
+			vec3 color;
+			color.r = texelFetch(originalImage, base_coord + ivec3(0, 0, 0), 0).r;
+			color.g = texelFetch(originalImage, base_coord + ivec3(0, 0, 1), 0).r;
+			color.b = texelFetch(originalImage, base_coord + ivec3(0, 0, 2), 0).r;
+			if (isEmptyPixel(color)) {
+				continue;
+			}
+
+			sum += color;
+			count += 1u;
+		}
+	}
+
+	uvec4 block = uvec4(0u);
+	if (count > 0u) {
+		vec3 min_color = vec3(65504.0f);
+		vec3 max_color = vec3(0.0f);
+		vec3 block_colors[16];
+		uint block_valid[16];
+		for (uint i = 0u; i < 16u; ++i) {
+			block_colors[i] = vec3(0.0f);
+			block_valid[i] = 0u;
+		}
+		for (uint dy = 0u; dy < 4u; ++dy) {
+			for (uint dx = 0u; dx < 4u; ++dx) {
+				const uint linear = dy * 4u + dx;
+				const uvec2 pixel = block_id * 4u + uvec2(dx, dy);
+				if (pixel.x >= params.width || pixel.y >= params.height) {
+					continue;
+				}
+				const ivec3 base_coord = ivec3(pixel, 0);
+				vec3 color;
+				color.r = texelFetch(originalImage, base_coord + ivec3(0, 0, 0), 0).r;
+				color.g = texelFetch(originalImage, base_coord + ivec3(0, 0, 1), 0).r;
+				color.b = texelFetch(originalImage, base_coord + ivec3(0, 0, 2), 0).r;
+				if (isEmptyPixel(color)) {
+					continue;
+				}
+				block_colors[linear] = color;
+				block_valid[linear] = 1u;
+				min_color = min(min_color, color);
+				max_color = max(max_color, color);
+			}
+		}
+		const uint r0 = quantizeEndpoint10(min_color.r);
+		const uint g0 = quantizeEndpoint10(min_color.g);
+		const uint b0 = quantizeEndpoint10(min_color.b);
+		const uint r1 = quantizeEndpoint10(max_color.r);
+		const uint g1 = quantizeEndpoint10(max_color.g);
+		const uint b1 = quantizeEndpoint10(max_color.b);
+
+		setBits(block, 0u, 5u, 0x03u);
+		setBits(block, 5u, 10u, r0);
+		setBits(block, 15u, 10u, g0);
+		setBits(block, 25u, 10u, b0);
+		setBits(block, 35u, 10u, r1);
+		setBits(block, 45u, 10u, g1);
+		setBits(block, 55u, 10u, b1);
+
+		const vec3 endpoint0 = min_color;
+		const vec3 endpoint1 = max_color;
+		uint bit_cursor = 65u;
+		for (uint linear = 0u; linear < 16u; ++linear) {
+			uint best_index = 0u;
+			if (block_valid[linear] != 0u) {
+				float best_error = 3.0e38f;
+				for (uint index = 0u; index < 16u; ++index) {
+					const float w = float(kWeights4[index]) / 64.0f;
+					const vec3 candidate = mix(endpoint0, endpoint1, w);
+					const vec3 delta = block_colors[linear] - candidate;
+					const float error = dot(delta, delta);
+					if (error < best_error) {
+						best_error = error;
+						best_index = index;
+					}
+				}
+			}
+			if (linear == 0u) {
+				setBits(block, bit_cursor, 3u, best_index & 0x7u);
+				bit_cursor += 3u;
+			} else {
+				setBits(block, bit_cursor, 4u, best_index);
+				bit_cursor += 4u;
+			}
+		}
+	}
+
+	const uint block_index = block_id.y * params.blocksX + block_id.x;
+	blocks[block_index] = block;
+}

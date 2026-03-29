@@ -3,6 +3,10 @@
 #include "generated_kernels/aplusb_comp.h"
 #include "generated_kernels/atomic_add_comp.h"
 #include "generated_kernels/batched_binary_search_comp.h"
+#include "generated_kernels/brightness_stats_float_comp.h"
+#include "generated_kernels/brightness_stats_rgb9e5_comp.h"
+#include "generated_kernels/compare_hdr_rgb9e5_comp.h"
+#include "generated_kernels/encode_bc6h_constant_comp.h"
 #include "generated_kernels/fill_buffer_with_zeros_comp.h"
 #include "generated_kernels/image_conversion_from_float_to_T_comp.h"
 #include "generated_kernels/image_interpolation_comp.h"
@@ -23,7 +27,9 @@
 #include "generated_kernels/radix_sort_03_global_prefixes_scan_accumulation_portable_comp.h"
 #include "generated_kernels/radix_sort_04_scatter_comp.h"
 #include "generated_kernels/radix_sort_04_scatter_portable_comp.h"
+#include "generated_kernels/pack_hdr_rgb9e5_comp.h"
 #include "generated_kernels/rasterize_frag.h"
+#include "generated_kernels/rasterize_hdr_gnome_frag.h"
 #include "generated_kernels/rasterize_vert.h"
 #include "generated_kernels/rasterize_blending_frag.h"
 #include "generated_kernels/reduce_sum_packed_rgb8_to_u32_comp.h"
@@ -50,6 +56,18 @@ namespace avk2 {
 	}
 	const ProgramBinaries& getBatchedBinarySearch() {
 		return vulkan_binaries_batched_binary_search_comp;
+	}
+	const ProgramBinaries& getBrightnessStatsFloatKernel() {
+		return vulkan_binaries_brightness_stats_float_comp;
+	}
+	const ProgramBinaries& getBrightnessStatsRgb9e5Kernel() {
+		return vulkan_binaries_brightness_stats_rgb9e5_comp;
+	}
+	const ProgramBinaries& getCompareHdrRgb9e5Kernel() {
+		return vulkan_binaries_compare_hdr_rgb9e5_comp;
+	}
+	const ProgramBinaries& getEncodeBc6hConstantKernel() {
+		return vulkan_binaries_encode_bc6h_constant_comp;
 	}
 	const ProgramBinaries& getFillBufferWithZerosKernel() {
 		return vulkan_binaries_fill_buffer_with_zeros_comp;
@@ -118,8 +136,14 @@ namespace avk2 {
 	const ProgramBinaries& getRadixSort04ScatterPortableKernel() {
 		return vulkan_binaries_radix_sort_04_scatter_portable_comp;
 	}
+	const ProgramBinaries& getPackHdrRgb9e5Kernel() {
+		return vulkan_binaries_pack_hdr_rgb9e5_comp;
+	}
 	std::vector<const ProgramBinaries*> getRasterizeKernel() {
 		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_frag};
+	}
+	std::vector<const ProgramBinaries*> getRasterizeHdrGnomeKernel() {
+		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_hdr_gnome_frag};
 	}
 	std::vector<const ProgramBinaries*> getRasterizeWithBlendingKernel() {
 		return {&vulkan_binaries_rasterize_vert, &vulkan_binaries_rasterize_blending_frag};

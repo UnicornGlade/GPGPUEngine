@@ -1581,6 +1581,17 @@ avk2::raii::ImageData* avk2::VulkanEngine::createImage2D(unsigned int width, uns
 
 avk2::raii::ImageData* avk2::VulkanEngine::createImage2DArray(unsigned int width, unsigned int height, size_t cn, vk::Format format)
 {
+	vk::ImageUsageFlags usage_flags = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+	if (format == device_.typeToVkDepthStencilFormat(DataType32f)) {
+		usage_flags |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
+	} else {
+		usage_flags |= vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eColorAttachment;
+	}
+	return createImage2DArray(width, height, cn, format, usage_flags);
+}
+
+avk2::raii::ImageData* avk2::VulkanEngine::createImage2DArray(unsigned int width, unsigned int height, size_t cn, vk::Format format, vk::ImageUsageFlags usage_flags)
+{
 	rassert(width > 0 && height > 0, 537424666);
 	rassert(cn >= 1, 975169407);
 	size_t nlayers = cn;
@@ -1596,20 +1607,9 @@ avk2::raii::ImageData* avk2::VulkanEngine::createImage2DArray(unsigned int width
 			image_format_is_supported = true;
 		}
 	}
-	rassert(image_format_is_supported || format == depth_format, 116330000);
-
-	vk::FormatProperties format_properties = getPhysicalDevice().getFormatProperties(format);
-
-	// creating Image https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkImageUsageFlagBits.html
-	vk::ImageUsageFlags usage_flags = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
-	// see https://vulkan.gpuinfo.org/displayreport.php?id=30317#formats about compatibility between usage flags and vk::Format
-	if (isDepthImage) {
-		usage_flags |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
-	} else {
-		usage_flags |= vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eColorAttachment;
-		//			| vk::ImageUsageFlagBits::eInputAttachment // add support if needed
-		//			| ...
-	}
+	// Some tests use explicitly requested Vulkan formats that are outside the DataType<->vk::Format mapping.
+	// In that case we rely on vkCreateImage itself and the caller-provided usage flags instead of rejecting the format here.
+	rassert(image_format_is_supported || format == depth_format || usage_flags != vk::ImageUsageFlags(), 116330000);
 	if (device_.max_image_dimension_2d < std::max(width, height)) {
 		throw avk2::vk_exception("Vulkan device " + device_.name + " can't create image2DArray "
 								 + to_string(nlayers) + "x" + to_string(width) + "x" + to_string(height) + " (format=" + to_string(format) + ")"
@@ -1642,6 +1642,28 @@ avk2::raii::ImageData* avk2::VulkanEngine::createImage2DArray(unsigned int width
 	vk::ImageAspectFlags image_aspect = (isDepthImage ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor);
 	return new avk2::raii::ImageData(image, image_allocation, std::move(sampler), initial_layout, (VkFlags) image_aspect, format,
 									 width, height, cn);
+}
+
+void avk2::VulkanEngine::copyBufferToImage(const avk2::raii::BufferData &buffer_src, size_t src_offset,
+										   const avk2::raii::ImageData &image_dst,
+										   size_t width, size_t height,
+										   size_t dst_x_offset, size_t dst_y_offset)
+{
+	rassert(width > 0 && height > 0, 2026032915123600001, width, height);
+	rassert(dst_x_offset + width <= image_dst.width(), 2026032915123600002, dst_x_offset, width, image_dst.width());
+	rassert(dst_y_offset + height <= image_dst.height(), 2026032915123600003, dst_y_offset, height, image_dst.height());
+	rassert(image_dst.channels() == 1, 2026032915123600004, image_dst.channels());
+
+	vk::raii::CommandBuffer command_buffer = createCommandBuffer();
+	command_buffer.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+	vk::ImageSubresourceLayers image_subresource_layers(vk::ImageAspectFlags(image_dst.getAspectFlags()), 0, 0, 1);
+	command_buffer.copyBufferToImage(buffer_src.getBuffer(), image_dst.getImage(), image_dst.getCurrentLayout(),
+									 vk::BufferImageCopy(src_offset, 0, 0,
+														 image_subresource_layers,
+														 vk::Offset3D(narrow_cast<int>(dst_x_offset), narrow_cast<int>(dst_y_offset), 0),
+														 vk::Extent3D(narrow_cast<uint32_t>(width), narrow_cast<uint32_t>(height), 1)));
+	command_buffer.end();
+	submitCommandBuffer(command_buffer, findFence("copyBufferToImage"));
 }
 
 template <typename T>

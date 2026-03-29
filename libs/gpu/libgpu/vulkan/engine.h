@@ -3,6 +3,7 @@
 #include "data_buffer.h"
 #include "data_image.h"
 #include "device.h"
+#include "vulkan_api_headers.h"
 
 #include <libbase/point.h>
 #include <libbase/platform.h>
@@ -407,9 +408,14 @@ namespace avk2 {
 		void							fillBuffer(const avk2::raii::BufferData &buffer_dst, size_t offset, size_t size, uint32_t value);
 		void							writeBuffer(const avk2::raii::BufferData &buffer_dst, size_t offset, size_t size, const void *src);
 		void							readBuffer(const avk2::raii::BufferData &buffer_src, size_t offset, size_t size, void *dst);
+		void							copyBufferToImage(const avk2::raii::BufferData &buffer_src, size_t src_offset,
+											 const avk2::raii::ImageData &image_dst,
+											 size_t width, size_t height,
+											 size_t dst_x_offset=0, size_t dst_y_offset=0);
 
 		avk2::raii::ImageData*			createDepthImage(unsigned int width, unsigned int height);
 		avk2::raii::ImageData*			createImage2DArray(unsigned int width, unsigned int height, size_t cn, DataType data_type);
+		avk2::raii::ImageData*			createImage2DArray(unsigned int width, unsigned int height, size_t cn, vk::Format format, vk::ImageUsageFlags usage_flags);
 
 		template <typename T>
 		void							writeImage(const avk2::raii::ImageData &image_dst, const TypedImage<T> &src);

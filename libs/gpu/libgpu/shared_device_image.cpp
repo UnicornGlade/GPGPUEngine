@@ -218,7 +218,14 @@ void shared_device_image::write(const shared_device_buffer &buffer, size_t width
 	} else
 #endif
 	{
-		context.cl()->copyBufferToImage(buffer.clmem(), clmem(), width, height, src_offset, dst_x_offset, dst_y_offset, async);
+		if (type_ == Context::TypeOpenCL) {
+			context.cl()->copyBufferToImage(buffer.clmem(), clmem(), width, height, src_offset, dst_x_offset, dst_y_offset, async);
+		} else if (type_ == Context::TypeVulkan) {
+			rassert(!async, 2026032915151800001);
+			context.vk()->copyBufferToImage(*buffer.vkBufferData(), buffer.vkoffset() + src_offset, *vkImageData(), width, height, dst_x_offset, dst_y_offset);
+		} else {
+			rassert(false, 2026032915151800002, type_);
+		}
 	}
 }
 
