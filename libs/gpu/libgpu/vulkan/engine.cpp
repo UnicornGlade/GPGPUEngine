@@ -499,6 +499,9 @@ public:
 		if (vulkan12_supported_features.vulkanMemoryModel) {
 			vulkan12_enabled_features.setVulkanMemoryModel(true);
 		}
+		if (vulkan12_supported_features.shaderBufferInt64Atomics) {
+			vulkan12_enabled_features.setShaderBufferInt64Atomics(true);
+		}
 		vulkan12_enabled_features.setPNext(pNextFeature);
 		pNextFeature = &vulkan12_enabled_features;
 
@@ -520,6 +523,9 @@ public:
 			// https://computergraphics.stackexchange.com/questions/9449/vulkan-using-gl-primitiveid-without-geometryshader-feature#comment14810_9449
 		} else {
 			device_enabled_features2.features.setGeometryShader(true); // requested for usage of gl_PrimitiveID
+		}
+		if (physical_device_->getFeatures().shaderInt64) {
+			device_enabled_features2.features.setShaderInt64(true);
 		}
 		device_enabled_features2.features.setFillModeNonSolid(true); // requested for wireframe rendering (i.e. polygonMode = vk::PolygonMode::eLine)
 		device_enabled_features2.setPNext(pNextFeature);
